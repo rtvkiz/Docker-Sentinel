@@ -1,0 +1,128 @@
+version: "1.0"
+name: default
+description: Default security policy for Docker Sentinel
+
+# Global settings
+global_settings:
+  allow_privileged: false
+  allow_host_network: false
+  allow_host_pid: false
+  allow_host_ipc: false
+  max_risk_score: 50
+  require_image_scan: false
+  require_non_root: false
+  require_read_only_fs: false
+
+# Capabilities that should be blocked
+blocked_capabilities:
+  - SYS_ADMIN      # Can mount filesystems, modify hostname, etc.
+  - SYS_MODULE     # Can load/unload kernel modules
+  - SYS_RAWIO      # Can perform raw I/O operations
+  - SYS_PTRACE     # Can trace processes (container escape vector)
+  - SYS_BOOT       # Can reboot the system
+  - NET_ADMIN      # Can modify network settings
+  - NET_RAW        # Can use RAW/PACKET sockets
+  - MAC_ADMIN      # Can configure MAC addresses
+  - MAC_OVERRIDE   # Can bypass MAC policies
+  - DAC_OVERRIDE   # Can bypass file permissions
+  - SETUID         # Can change UID
+  - SETGID         # Can change GID
+  - AUDIT_WRITE    # Can write to audit log
+  - AUDIT_CONTROL  # Can control audit subsystem
+
+# Registries that are allowed
+allowed_registries:
+  - docker.io
+  - gcr.io
+  - ghcr.io
+  - quay.io
+  - registry.k8s.io
+  - public.ecr.aws
+
+# Mounts that should be flagged
+dangerous_mounts:
+  - path: "/"
+    action: block
+    reason: "Host root filesystem access"
+
+  - path: "/var/run/docker.sock"
+    action: block
+    reason: "Docker socket allows container escape"
+
+  - path: "/run/docker.sock"
+    action: block
+    reason: "Docker socket allows container escape"
+
+  - path: "/proc"
+    action: block
+    reason: "Process filesystem can leak host info"
+
+  - path: "/sys"
+    action: warn
+    reason: "System filesystem access"
+
+  - path: "/dev"
+    action: warn
+    reason: "Device access"
+
+  - path: "/etc"
+    action: warn
+    reason: "System configuration access"
+
+  - path: "/root"
+    action: warn
+    reason: "Root home directory access"
+
+  - path: "/home"
+    action: warn
+    reason: "User home directories access"
+
+  - path: "/boot"
+    action: block
+    reason: "Boot files access"
+
+  - path: "/lib/modules"
+    action: block
+    reason: "Kernel modules access"
+
+# Security options requirements
+security_options:
+  require_seccomp: false
+  require_apparmor: false
+  allow_no_new_privileges: true
+
+# Image scanning settings
+image_scanning:
+  enabled: true
+  scanners:
+    - trivy
+  max_critical: 0
+  max_high: 5
+  cache_duration: "24h"
+
+# Secret scanning settings
+secret_scanning:
+  enabled: true
+  scanner: trufflehog
+  block_on_verified: true      # Block if verified (active) secrets found
+  max_critical: 0              # Block on any critical secrets
+  max_high: 0                  # Block on any high-severity secrets
+  max_medium: 5                # Allow up to 5 medium-severity secrets
+  verified_secret_score: 50    # Risk score for verified secrets
+  critical_secret_score: 40    # Risk score for critical secrets
+  high_secret_score: 25        # Risk score for high secrets
+  ignore_detectors: []         # Detectors to ignore (e.g., Generic, Base64)
+  exclude_paths: []            # Paths to exclude from scanning
+
+# Audit settings
+audit:
+  enabled: true
+  log_all_commands: true
+  log_blocked_commands: true
+  export_format: "json"
+
+# Notification settings (optional)
+notifications:
+  webhook_url: ""
+  slack_webhook: ""
+  email_alerts: []

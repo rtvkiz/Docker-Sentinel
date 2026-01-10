@@ -1,0 +1,27 @@
+[Unit]
+Description=Docker Sentinel Authorization Plugin
+Documentation=https://github.com/rtvkiz/docker-sentinel
+After=network.target
+Before=docker.service
+Requires=docker.socket
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/sentinel authz start --foreground --socket /run/docker/plugins/sentinel.sock
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+User=root
+Group=docker
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/run/docker/plugins /var/lib/sentinel /var/run
+
+# Environment
+Environment=HOME=/root
+
+[Install]
+WantedBy=multi-user.target

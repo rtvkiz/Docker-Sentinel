@@ -1,0 +1,75 @@
+# Docker Sentinel Policy: ci-cd
+# Policy for CI/CD pipelines
+
+version: "1.0"
+name: ci-cd
+description: Policy for CI/CD pipeline environments
+
+# Global settings - balanced for CI
+allow_privileged: false
+allow_host_network: false
+allow_host_pid: false
+allow_host_ipc: true
+max_risk_score: 40
+require_image_scan: true
+require_non_root: false
+require_read_only_fs: false
+
+# Block most dangerous capabilities
+blocked_capabilities:
+  - SYS_ADMIN
+  - SYS_PTRACE
+  - SYS_MODULE
+  - NET_ADMIN
+
+# Allow common CI registries
+allowed_registries:
+  - docker.io
+  - gcr.io
+  - ghcr.io
+  - quay.io
+  - registry.gitlab.com
+  - public.ecr.aws
+
+# Block sensitive mounts, warn on docker socket
+dangerous_mounts:
+  - path: "/"
+    action: block
+  - path: "/proc"
+    action: block
+  - path: "/sys"
+    action: block
+  - path: "/boot"
+    action: block
+  - path: "/var/run/docker.sock"
+    action: warn
+
+# Security options - not required in CI
+security_options:
+  require_seccomp: false
+  require_apparmor: false
+  allow_no_new_privileges: true
+
+# Image scanning - moderate
+image_scanning:
+  enabled: true
+  scanners:
+    - trivy
+  max_critical: 0
+  max_high: 5
+  cache_duration: "4h"
+
+# Secret scanning - balanced approach
+secret_scanning:
+  enabled: true
+  scanner: trufflehog
+  block_on_verified: true
+  max_critical: 0
+  max_high: 2
+
+# Full audit logging
+audit:
+  enabled: true
+  log_all_commands: true
+  log_blocked_commands: true
+  export_format: "json"

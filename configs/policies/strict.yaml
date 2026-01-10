@@ -1,0 +1,128 @@
+version: "1.0"
+name: strict
+description: Strict security policy - blocks most dangerous operations
+
+# Global settings - very restrictive
+global_settings:
+  allow_privileged: false
+  allow_host_network: false
+  allow_host_pid: false
+  allow_host_ipc: false
+  max_risk_score: 25
+  require_image_scan: true
+  require_non_root: true
+  require_read_only_fs: true
+
+# Block all dangerous capabilities
+blocked_capabilities:
+  - SYS_ADMIN
+  - SYS_MODULE
+  - SYS_RAWIO
+  - SYS_PTRACE
+  - SYS_BOOT
+  - SYS_CHROOT
+  - SYS_TIME
+  - NET_ADMIN
+  - NET_RAW
+  - NET_BIND_SERVICE
+  - MAC_ADMIN
+  - MAC_OVERRIDE
+  - DAC_OVERRIDE
+  - DAC_READ_SEARCH
+  - SETUID
+  - SETGID
+  - SETFCAP
+  - SETPCAP
+  - AUDIT_WRITE
+  - AUDIT_CONTROL
+  - AUDIT_READ
+  - MKNOD
+  - FOWNER
+  - FSETID
+  - KILL
+  - CHOWN
+  - IPC_LOCK
+  - IPC_OWNER
+  - SYS_PACCT
+  - SYS_NICE
+  - SYS_RESOURCE
+  - SYS_TTY_CONFIG
+  - LEASE
+  - LINUX_IMMUTABLE
+  - WAKE_ALARM
+  - BLOCK_SUSPEND
+  - SYSLOG
+
+# Only allow verified registries
+allowed_registries:
+  - docker.io/library
+  - gcr.io/distroless
+  - gcr.io/google-containers
+
+# Block most mounts
+dangerous_mounts:
+  - path: "/"
+    action: block
+  - path: "/var/run/docker.sock"
+    action: block
+  - path: "/run/docker.sock"
+    action: block
+  - path: "/proc"
+    action: block
+  - path: "/sys"
+    action: block
+  - path: "/dev"
+    action: block
+  - path: "/etc"
+    action: block
+  - path: "/root"
+    action: block
+  - path: "/home"
+    action: block
+  - path: "/boot"
+    action: block
+  - path: "/lib"
+    action: block
+  - path: "/usr"
+    action: warn
+  - path: "/var"
+    action: warn
+  - path: "/tmp"
+    action: warn
+
+# Require security profiles
+security_options:
+  require_seccomp: true
+  require_apparmor: true
+  allow_no_new_privileges: true
+
+# Strict image scanning
+image_scanning:
+  enabled: true
+  scanners:
+    - trivy
+    - grype
+  max_critical: 0
+  max_high: 0
+  cache_duration: "1h"
+
+# Strict secret scanning - zero tolerance
+secret_scanning:
+  enabled: true
+  scanner: trufflehog
+  block_on_verified: true      # Always block on verified secrets
+  max_critical: 0              # Zero critical secrets allowed
+  max_high: 0                  # Zero high-severity secrets allowed
+  max_medium: 0                # Zero medium-severity secrets allowed
+  verified_secret_score: 100   # Max score for verified secrets
+  critical_secret_score: 50    # High score for critical secrets
+  high_secret_score: 40        # High score for high-severity secrets
+  ignore_detectors: []         # Don't ignore any detectors
+  exclude_paths: []            # Don't exclude any paths
+
+# Full audit logging
+audit:
+  enabled: true
+  log_all_commands: true
+  log_blocked_commands: true
+  export_format: "json"

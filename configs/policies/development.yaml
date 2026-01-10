@@ -1,0 +1,67 @@
+# Docker Sentinel Policy: development
+# Relaxed policy for development environments
+
+version: "1.0"
+name: development
+description: Relaxed policy for local development - warns but rarely blocks
+
+# Global settings - permissive for development
+allow_privileged: false  # Still block privileged, but warn only
+allow_host_network: true
+allow_host_pid: true
+allow_host_ipc: true
+max_risk_score: 75
+require_image_scan: false
+require_non_root: false
+require_read_only_fs: false
+
+# Only block the most dangerous capabilities
+blocked_capabilities:
+  - SYS_ADMIN
+  - SYS_MODULE
+
+# Allow any registry in dev
+allowed_registries: []
+
+# Dangerous mounts - only block root
+dangerous_mounts:
+  - path: "/"
+    action: block
+  - path: "/var/run/docker.sock"
+    action: warn
+  - path: "/etc"
+    action: warn
+  - path: "/proc"
+    action: warn
+  - path: "/sys"
+    action: warn
+
+# Security options - not required in dev
+security_options:
+  require_seccomp: false
+  require_apparmor: false
+  allow_no_new_privileges: true
+
+# Image scanning - relaxed
+image_scanning:
+  enabled: true
+  scanners:
+    - trivy
+  max_critical: 5
+  max_high: 20
+  cache_duration: "24h"
+
+# Secret scanning - still enabled but more permissive
+secret_scanning:
+  enabled: true
+  scanner: trufflehog
+  block_on_verified: true
+  max_critical: 5
+  max_high: 10
+
+# Audit logging
+audit:
+  enabled: true
+  log_all_commands: true
+  log_blocked_commands: true
+  export_format: "json"

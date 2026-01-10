@@ -1,0 +1,211 @@
+# Docker Sentinel Policy: production
+# Balanced security policy for production environments
+
+version: "1.0"
+name: production
+description: Production security policy - blocks dangerous operations, warns on risks
+author: Docker Sentinel
+tags:
+  - production
+  - enterprise
+
+mode: enforce
+
+settings:
+  max_risk_score: 50
+
+  require_image_scan: false
+
+  image_scanning:
+    enabled: true
+    scanners:
+      - trivy
+    max_critical: 0
+    max_high: 5
+    max_medium: 20
+    cache_duration: "24h"
+
+  secret_scanning:
+    enabled: true
+    scanner: trufflehog
+    block_on_verified: true
+    max_critical: 0
+    max_high: 0
+    max_medium: 3
+    verified_secret_score: 100
+    critical_secret_score: 50
+    high_secret_score: 30
+    ignore_detectors:
+      - generic-api-key
+    exclude_paths:
+      - "**/*test*"
+      - "**/*example*"
+
+rules:
+  privileged:
+    action: block
+    message: "Privileged containers bypass all security controls"
+
+  host_namespaces:
+    network:
+      action: block
+      message: "Host network bypasses container network isolation"
+    pid:
+      action: block
+      message: "Host PID namespace allows container escape"
+    ipc:
+      action: block
+      message: "Host IPC namespace allows shared memory attacks"
+    uts:
+      action: warn
+      message: "Host UTS namespace shares hostname with host"
+
+  capabilities:
+    default_action: warn
+    require_drop_all: false
+    blocked:
+      - name: SYS_ADMIN
+        message: "SYS_ADMIN enables container escape"
+      - name: SYS_PTRACE
+        message: "SYS_PTRACE allows process injection"
+      - name: SYS_MODULE
+        message: "SYS_MODULE allows kernel module loading"
+      - name: DAC_READ_SEARCH
+        message: "DAC_READ_SEARCH bypasses file permissions"
+      - name: NET_ADMIN
+        message: "NET_ADMIN allows network reconfiguration"
+      - name: NET_RAW
+        message: "NET_RAW allows packet spoofing"
+      - name: SYS_RAWIO
+        message: "SYS_RAWIO allows raw device access"
+    allowed:
+      - name: NET_BIND_SERVICE
+      - name: CHOWN
+      - name: SETGID
+      - name: SETUID
+      - name: KILL
+      - name: FOWNER
+
+  mounts:
+    block_bind_mounts: false
+    require_read_only: false
+    blocked:
+      - path: "/"
+        message: "Root filesystem mount enables host takeover"
+      - path: "/var/run/docker.sock"
+        message: "Docker socket mount enables container escape"
+      - path: "/run/docker.sock"
+        message: "Docker socket mount enables container escape"
+      - path: "/proc"
+        message: "/proc mount exposes host processes"
+      - path: "/sys"
+        message: "/sys mount enables kernel parameter modification"
+      - path: "/dev"
+        message: "/dev mount exposes host devices"
+      - path: "/etc/shadow"
+        message: "Shadow file contains password hashes"
+      - path: "/root/.ssh"
+        message: "SSH keys should not be mounted"
+    warned:
+      - path: "/etc"
+        message: "Consider mounting specific config files instead"
+      - path: "/home"
+        message: "Home directory mount may expose sensitive data"
+      - path: "/var/log"
+        message: "Log directory mount - ensure read-only if possible"
+
+  security_options:
+    require_seccomp: false
+    allowed_seccomp_profiles:
+      - default
+      - runtime/default
+    require_apparmor: false
+    require_no_new_privileges: false
+
+  container:
+    require_non_root: false
+    blocked_users: []
+    require_read_only_rootfs: false
+    require_resource_limits: false
+    max_memory: "8Gi"
+    max_cpus: "4"
+
+  images:
+    allowed_registries:
+      - docker.io/library
+      - docker.io
+      - gcr.io
+      - ghcr.io
+      - quay.io
+      - registry.k8s.io
+      - mcr.microsoft.com
+      - public.ecr.aws
+    blocked_registries: []
+    blocked_images: []
+    block_latest_tag: false
+    require_digest: false
+    require_signed: false
+
+  network:
+    allowed_modes:
+      - bridge
+      - none
+      - container
+    blocked_ports:
+      - port: "22"
+        message: "SSH port - use docker exec instead"
+      - port: "23"
+        message: "Telnet is insecure"
+
+  environment:
+    block_secrets: true
+    secret_patterns:
+      - PASSWORD
+      - PASSWD
+      - SECRET
+      - TOKEN
+      - API_KEY
+      - APIKEY
+      - CREDENTIAL
+      - AWS_ACCESS_KEY
+      - AWS_SECRET_KEY
+      - AZURE_
+      - GCP_
+      - DATABASE_URL
+      - DATABASE_PASSWORD
+      - DB_PASSWORD
+      - MYSQL_ROOT_PASSWORD
+      - POSTGRES_PASSWORD
+      - MONGO_INITDB_ROOT_PASSWORD
+      - REDIS_PASSWORD
+      - GITHUB_TOKEN
+      - GITLAB_TOKEN
+      - PRIVATE_KEY
+      - SSH_KEY
+      - ENCRYPTION_KEY
+      - JWT_SECRET
+      - SESSION_SECRET
+
+# Custom rules - NOTE: only these fields are supported for conditions:
+# privileged, image, user, network_mode, pid_mode
+# Operators: equals, not_equals, contains, not_contains, matches, exists
+custom_rules:
+  - name: no-debug-images
+    description: Block images with debug in name
+    severity: high
+    category: supply_chain
+    condition:
+      field: image
+      operator: matches
+      value: ".*(debug|dev-build).*"
+    message: "Debug/development images should not run in production"
+
+  - name: warn-root-user
+    description: Warn when running as root
+    severity: medium
+    category: privilege_escalation
+    condition:
+      field: user
+      operator: equals
+      value: "root"
+    message: "Container running as root - consider using non-root user"
