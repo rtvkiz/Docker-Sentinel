@@ -662,11 +662,18 @@ func (e *Evaluator) matchesPath(source, pattern string) bool {
 }
 
 func (e *Evaluator) determineAllowed(result *EvaluationResult) bool {
+	// Audit mode: always allow, just log
 	if e.policy.Mode == "audit" {
 		return true
 	}
 
-	if len(result.Violations) > 0 && e.policy.Mode == "enforce" {
+	// Warn mode: always allow, but warnings are recorded
+	if e.policy.Mode == "warn" {
+		return true
+	}
+
+	// Enforce mode: block if there are violations or score exceeds max
+	if len(result.Violations) > 0 {
 		return false
 	}
 
