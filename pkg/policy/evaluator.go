@@ -153,6 +153,7 @@ func (e *Evaluator) evaluatePrivileged(cmd *interceptor.DockerCommand, result *E
 		result.Mitigations = append(result.Mitigations, "Remove --privileged flag. Use specific capabilities with --cap-add instead.")
 	} else if rule.Action == ActionWarn {
 		result.Warnings = append(result.Warnings, v)
+		result.Score += v.ScoreImpact // Warnings also contribute to risk score
 	}
 }
 
@@ -284,15 +285,17 @@ func (e *Evaluator) evaluateMounts(cmd *interceptor.DockerCommand, result *Evalu
 		for _, warned := range mounts.Warned {
 			if e.matchesPath(source, warned.Path) {
 				v := Violation{
-					Rule:     "warned_mount",
-					Severity: "medium",
-					Category: "data_exposure",
-					Message:  fmt.Sprintf("Mounting %s may expose sensitive data", source),
+					Rule:        "warned_mount",
+					Severity:    "medium",
+					Category:    "data_exposure",
+					Message:     fmt.Sprintf("Mounting %s may expose sensitive data", source),
+					ScoreImpact: 10,
 				}
 				if warned.Message != "" {
 					v.Message = warned.Message
 				}
 				result.Warnings = append(result.Warnings, v)
+				result.Score += v.ScoreImpact // Warnings also contribute to risk score
 			}
 		}
 	}
@@ -626,6 +629,7 @@ func (e *Evaluator) addViolation(result *EvaluationResult, rule RuleAction, v Vi
 		}
 	} else if rule.Action == ActionWarn {
 		result.Warnings = append(result.Warnings, v)
+		result.Score += v.ScoreImpact // Warnings also contribute to risk score
 	}
 }
 
