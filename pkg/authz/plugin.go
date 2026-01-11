@@ -9,10 +9,8 @@ import (
 	"time"
 
 	"github.com/rtvkiz/docker-sentinel/pkg/audit"
-	appconfig "github.com/rtvkiz/docker-sentinel/pkg/config"
 	"github.com/rtvkiz/docker-sentinel/pkg/interceptor"
 	"github.com/rtvkiz/docker-sentinel/pkg/policy"
-	"github.com/rtvkiz/docker-sentinel/pkg/scanner"
 )
 
 // getDefaultPoliciesDir returns the policies directory based on priority:
@@ -43,14 +41,14 @@ func getDefaultPoliciesDir() string {
 
 // Plugin implements the Docker authorization plugin
 type Plugin struct {
-	config        *PluginConfig
-	policyMgr     *policy.Manager
-	evaluator     *policy.Evaluator
-	converter     *Converter
-	auditLogger   *audit.Logger
-	secretScanner *scanner.TruffleHogScanner
-	startTime     time.Time
-	mu            sync.RWMutex
+	config           *PluginConfig
+	policyMgr        *policy.Manager
+	evaluator        *policy.Evaluator
+	converter        *Converter
+	auditLogger      *audit.Logger
+	activePolicyName string
+	startTime        time.Time
+	mu               sync.RWMutex
 }
 
 // NewPlugin creates a new authorization plugin
@@ -60,10 +58,6 @@ func NewPlugin(config *PluginConfig) (*Plugin, error) {
 		converter: NewConverter(),
 		startTime: time.Now(),
 	}
-
-	// Initialize secret scanner (TruffleHog)
-	scannerCfg := &appconfig.Config{}
-	p.secretScanner = scanner.NewTruffleHogScanner(scannerCfg)
 
 	// Initialize policy manager with proper path resolution
 	if config.PoliciesDir == "" {
@@ -76,26 +70,24 @@ func NewPlugin(config *PluginConfig) (*Plugin, error) {
 		p.log("warn", "Failed to initialize policies directory: %v", err)
 	}
 
-	// Initialize audit logger
-	if config.AuditDir == "" {
-		config.AuditDir = audit.GetDefaultAuditDir(filepath.Dir(config.PoliciesDir))
-	}
-	auditLogger, err := audit.NewLogger(audit.LoggerConfig{
-		AuditDir: config.AuditDir,
-		Enabled:  config.AuditEnabled,
-	})
-	if err != nil {
-		p.log("warn", "Failed to initialize audit logger: %v (audit disabled)", err)
-	} else {
-		p.auditLogger = auditLogger
-		if config.AuditEnabled {
-			p.log("info", "Audit logging enabled (dir: %s)", config.AuditDir)
-		}
-	}
-
 	// Load the active policy
 	if err := p.loadPolicy(); err != nil {
 		return nil, fmt.Errorf("failed to load policy: %w", err)
+	}
+
+	// Initialize audit logger
+	if config.AuditEnabled {
+		auditDir := config.AuditDir
+		if auditDir == "" {
+			auditDir = "/etc/sentinel/audit"
+		}
+		logger, err := audit.NewLogger(auditDir)
+		if err != nil {
+			p.log("warn", "Failed to initialize audit logger: %v", err)
+		} else {
+			p.auditLogger = logger
+			p.log("info", "Audit logging enabled (dir: %s)", auditDir)
+		}
 	}
 
 	return p, nil
@@ -116,15 +108,6 @@ func (p *Plugin) loadPolicy() error {
 	if p.config.PolicyName != "" {
 		pol, err = p.policyMgr.Load(p.config.PolicyName)
 	} else {
-		// Reload config file to get current active_policy setting
-		// This is important for hot reload when user runs "sentinel policy use <name>"
-		cfg, cfgErr := appconfig.Load("")
-		if cfgErr == nil && cfg.ActivePolicy != "" {
-			// Update the manager's active policy from the config file
-			if setErr := p.policyMgr.SetActive(cfg.ActivePolicy); setErr != nil {
-				p.log("warn", "Failed to set active policy from config: %v", setErr)
-			}
-		}
 		pol, err = p.policyMgr.GetActive()
 	}
 
@@ -140,6 +123,9 @@ func (p *Plugin) loadPolicy() error {
 		return fmt.Errorf("failed to create evaluator: %w", err)
 	}
 
+	// Store active policy name for audit logging
+	p.activePolicyName = pol.Name
+
 	p.log("info", "Loaded policy: %s (mode: %s)", pol.Name, pol.Mode)
 	return nil
 }
@@ -150,238 +136,57 @@ func (p *Plugin) ReloadPolicy() error {
 	return p.loadPolicy()
 }
 
-// AuthZReqResult contains the authorization result with audit info
-type AuthZReqResult struct {
-	Response   *AuthZResponse
-	RiskScore  int
-	Violations []string
-	Image      string
-	Command    string
-	PolicyName string
-}
-
 // AuthZReq handles pre-request authorization
 func (p *Plugin) AuthZReq(req *AuthZRequest) *AuthZResponse {
-	result := p.AuthZReqWithAudit(req)
-	return result.Response
-}
-
-// AuthZReqWithAudit handles pre-request authorization and returns audit info
-func (p *Plugin) AuthZReqWithAudit(req *AuthZRequest) *AuthZReqResult {
-	result := &AuthZReqResult{
-		Response: &AuthZResponse{Allow: true},
-	}
-
 	// Check if this is a security-relevant request
 	if !p.converter.IsSecurityRelevant(req) {
-		return result
+		return &AuthZResponse{Allow: true}
 	}
 
 	// Convert API request to DockerCommand
 	cmd, err := p.converter.Convert(req)
 	if err != nil {
-		result.Response = p.handleConversionError(req, err)
-		return result
+		return p.handleConversionError(req, err)
 	}
-
-	// Capture command info for audit
-	result.Image = cmd.Image
-	result.Command = p.formatCommandSummary(cmd)
 
 	// Evaluate against policy
 	p.mu.RLock()
 	evaluator := p.evaluator
-	policyName := p.config.PolicyName
 	p.mu.RUnlock()
 
 	if evaluator == nil {
-		result.Response = p.handleError(req, "no policy evaluator available")
-		return result
+		return p.handleError(req, "no policy evaluator available")
 	}
 
-	evalResult, err := evaluator.Evaluate(cmd)
+	result, err := evaluator.Evaluate(cmd)
 	if err != nil {
-		result.Response = p.handleEvaluationError(req, err)
-		return result
-	}
-
-	// Capture evaluation results for audit
-	result.RiskScore = evalResult.Score
-	result.PolicyName = policyName
-	for _, v := range evalResult.Violations {
-		result.Violations = append(result.Violations, v.Message)
-	}
-
-	// For push operations, scan the image for secrets before allowing
-	if cmd.Action == "push" && cmd.Image != "" {
-		if secretResponse := p.scanImageForSecrets(cmd.Image, "push"); secretResponse != nil {
-			result.Response = secretResponse
-			result.Violations = append(result.Violations, "Secrets detected in image")
-			return result
-		}
+		return p.handleEvaluationError(req, err)
 	}
 
 	// Determine response
-	if evalResult.Allowed {
+	if result.Allowed {
 		// Check for warnings
-		if len(evalResult.Warnings) > 0 {
-			for _, w := range evalResult.Warnings {
-				result.Violations = append(result.Violations, w.Message)
-			}
-			result.Response = &AuthZResponse{
+		if len(result.Warnings) > 0 {
+			return &AuthZResponse{
 				Allow: true,
-				Msg:   p.formatWarnings(evalResult.Warnings),
+				Msg:   p.formatWarnings(result.Warnings),
 			}
-			return result
 		}
-		result.Response = &AuthZResponse{Allow: true}
-		return result
+		return &AuthZResponse{Allow: true}
 	}
 
 	// Request denied
-	result.Response = &AuthZResponse{
+	return &AuthZResponse{
 		Allow: false,
-		Msg:   p.formatDenialMessage(evalResult),
-	}
-	return result
-}
-
-// formatCommandSummary creates a readable docker command from the parsed command
-func (p *Plugin) formatCommandSummary(cmd *interceptor.DockerCommand) string {
-	if cmd == nil {
-		return ""
-	}
-
-	parts := []string{"docker", cmd.Action}
-
-	// Add key flags that are security-relevant
-	if cmd.Privileged {
-		parts = append(parts, "--privileged")
-	}
-	if cmd.NetworkMode == "host" {
-		parts = append(parts, "--net=host")
-	}
-	if cmd.PIDMode == "host" {
-		parts = append(parts, "--pid=host")
-	}
-	if cmd.User != "" {
-		parts = append(parts, "--user", cmd.User)
-	}
-	if cmd.ReadOnlyRootfs {
-		parts = append(parts, "--read-only")
-	}
-
-	// Add capabilities
-	for _, cap := range cmd.Capabilities.Add {
-		parts = append(parts, "--cap-add="+cap)
-	}
-
-	// Add volume mounts (summarized)
-	for _, vol := range cmd.Volumes {
-		if vol.Source != "" && vol.Destination != "" {
-			mount := "-v " + vol.Source + ":" + vol.Destination
-			if vol.ReadOnly {
-				mount += ":ro"
-			}
-			parts = append(parts, mount)
-		}
-	}
-
-	// Add resource limits
-	if cmd.Resources.Memory != "" {
-		parts = append(parts, "-m", cmd.Resources.Memory)
-	}
-	if cmd.Resources.CPUs != "" {
-		parts = append(parts, "--cpus", cmd.Resources.CPUs)
-	}
-
-	// Add container name if specified
-	if cmd.ContainerName != "" {
-		parts = append(parts, "--name", cmd.ContainerName)
-	}
-
-	// Add flags for interactive/tty/detach
-	if cmd.Detach {
-		parts = append(parts, "-d")
-	}
-	if cmd.Interactive && cmd.TTY {
-		parts = append(parts, "-it")
-	} else if cmd.Interactive {
-		parts = append(parts, "-i")
-	} else if cmd.TTY {
-		parts = append(parts, "-t")
-	}
-
-	// Add image
-	if cmd.Image != "" {
-		parts = append(parts, cmd.Image)
-	}
-
-	// Add command if present
-	if len(cmd.Command) > 0 {
-		parts = append(parts, cmd.Command...)
-	}
-
-	return strings.Join(parts, " ")
-}
-
-// LogAuditEntry logs an audit entry for the request
-func (p *Plugin) LogAuditEntry(entry *audit.Entry) {
-	if p.auditLogger != nil {
-		if err := p.auditLogger.Log(entry); err != nil {
-			p.log("error", "Failed to log audit entry: %v", err)
-		}
+		Msg:   p.formatDenialMessage(result),
 	}
 }
 
 // AuthZRes handles post-request authorization
 func (p *Plugin) AuthZRes(req *AuthZRequest) *AuthZResponse {
-	// Check if this is a successful build response
-	if p.isBuildResponse(req) && req.ResponseStatusCode == 200 {
-		// Extract the image tag from the build request
-		image := p.extractBuildTag(req.RequestURI)
-		if image != "" {
-			// Scan the built image for secrets
-			if secretResponse := p.scanImageForSecrets(image, "build"); secretResponse != nil {
-				// For post-build, we can't really block (image is already built)
-				// But we log a warning - the push will be blocked later
-				p.log("warn", "Built image %s contains secrets - push will be blocked", image)
-			}
-		}
-	}
-
-	// Post-request authorization - allow the response through
+	// Post-request authorization - we typically allow all
+	// This could be extended to filter response data
 	return &AuthZResponse{Allow: true}
-}
-
-// isBuildResponse checks if this is a docker build response
-func (p *Plugin) isBuildResponse(req *AuthZRequest) bool {
-	return req.RequestMethod == "POST" && strings.Contains(req.RequestURI, "/build")
-}
-
-// extractBuildTag extracts the image tag from a build request URI
-// URI format: /v1.xx/build?t=imagename:tag&...
-func (p *Plugin) extractBuildTag(uri string) string {
-	// Parse the query parameters
-	parts := strings.SplitN(uri, "?", 2)
-	if len(parts) != 2 {
-		return ""
-	}
-
-	// Look for the 't' parameter (tag)
-	for _, param := range strings.Split(parts[1], "&") {
-		kv := strings.SplitN(param, "=", 2)
-		if len(kv) == 2 && kv[0] == "t" {
-			// URL decode the tag value
-			tag := kv[1]
-			// Handle URL encoding (basic)
-			tag = strings.ReplaceAll(tag, "%2F", "/")
-			tag = strings.ReplaceAll(tag, "%3A", ":")
-			return tag
-		}
-	}
-
-	return ""
 }
 
 // handleConversionError handles errors during request conversion
@@ -528,101 +333,168 @@ func (p *Plugin) Close() error {
 	return nil
 }
 
-// scanImageForSecrets runs TruffleHog on an image and returns a denial response if secrets are found
-// Returns nil if no secrets found or scanning is disabled/unavailable
-func (p *Plugin) scanImageForSecrets(image string, action string) *AuthZResponse {
-	if image == "" {
-		return nil
+// LogAuditEntry logs an audit entry if audit logging is enabled
+func (p *Plugin) LogAuditEntry(entry *audit.Entry) {
+	if p.auditLogger == nil {
+		return
 	}
 
-	// Check if TruffleHog is available
-	if p.secretScanner == nil || !p.secretScanner.Available() {
-		p.log("debug", "TruffleHog not available, skipping secret scan for %s", image)
-		return nil
+	if err := p.auditLogger.Log(entry); err != nil {
+		p.log("error", "Failed to log audit entry: %v", err)
+	}
+}
+
+// AuthZReqResult contains the authorization result with additional audit info
+type AuthZReqResult struct {
+	Response   *AuthZResponse
+	Image      string
+	Command    string
+	RiskScore  int
+	PolicyName string
+	Violations []string
+}
+
+// AuthZReqWithAudit handles pre-request authorization and returns audit info
+func (p *Plugin) AuthZReqWithAudit(req *AuthZRequest) *AuthZReqResult {
+	result := &AuthZReqResult{
+		Response: &AuthZResponse{Allow: true},
 	}
 
-	// Get secret scanning settings from policy
+	// Check if this is a security-relevant request
+	if !p.converter.IsSecurityRelevant(req) {
+		return result
+	}
+
+	// Convert API request to DockerCommand
+	cmd, err := p.converter.Convert(req)
+	if err != nil {
+		result.Response = p.handleConversionError(req, err)
+		return result
+	}
+
+	// Capture command info for audit
+	result.Image = cmd.Image
+	result.Command = p.formatCommandSummary(cmd)
+
+	// Evaluate against policy
 	p.mu.RLock()
 	evaluator := p.evaluator
 	p.mu.RUnlock()
 
 	if evaluator == nil {
-		return nil
+		result.Response = p.handleError(req, "no policy evaluator available")
+		return result
 	}
 
-	secretSettings := evaluator.GetSecretScanSettings()
-	if !secretSettings.Enabled {
-		p.log("debug", "Secret scanning disabled in policy, skipping scan for %s", image)
-		return nil
-	}
-
-	p.log("info", "Scanning image for secrets before %s: %s", action, image)
-
-	// Run TruffleHog scan
-	result, err := p.secretScanner.ScanSecrets(image)
+	evalResult, err := evaluator.Evaluate(cmd)
 	if err != nil {
-		p.log("warn", "Secret scan failed for %s: %v", image, err)
-		// Don't block on scan failure - just log and continue
-		return nil
+		result.Response = p.handleEvaluationError(req, err)
+		return result
 	}
 
-	if result.SecretsFound == 0 {
-		p.log("info", "No secrets found in image: %s", image)
-		return nil
+	// Capture evaluation info for audit
+	result.RiskScore = evalResult.Score
+	result.PolicyName = p.activePolicyName
+	for _, v := range evalResult.Violations {
+		result.Violations = append(result.Violations, v.Message)
+	}
+	for _, w := range evalResult.Warnings {
+		result.Violations = append(result.Violations, w.Message)
 	}
 
-	// Evaluate scan results against policy
-	evaluation := evaluator.EvaluateSecretScan(result)
-
-	if !evaluation.Allowed {
-		// Build denial message
-		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("\n\n  🔐 SECRET SCAN BLOCKED %s\n", strings.ToUpper(action)))
-		sb.WriteString("  ─────────────────────────────────────────\n")
-		sb.WriteString(fmt.Sprintf("  Image: %s\n", image))
-		sb.WriteString(fmt.Sprintf("  Secrets Found: %d\n\n", result.SecretsFound))
-
-		// Count by severity
-		critical, high, medium, verified := 0, 0, 0, 0
-		for _, secret := range result.Secrets {
-			if secret.Verified {
-				verified++
+	// Determine response
+	if evalResult.Allowed {
+		// Check for warnings
+		if len(evalResult.Warnings) > 0 {
+			result.Response = &AuthZResponse{
+				Allow: true,
+				Msg:   p.formatWarnings(evalResult.Warnings),
 			}
-			switch secret.Severity {
-			case "CRITICAL":
-				critical++
-			case "HIGH":
-				high++
-			case "MEDIUM":
-				medium++
-			}
+		} else {
+			result.Response = &AuthZResponse{Allow: true}
 		}
-
-		if verified > 0 {
-			sb.WriteString(fmt.Sprintf("  🚫 Verified secrets: %d (confirmed active!)\n", verified))
-		}
-		if critical > 0 {
-			sb.WriteString(fmt.Sprintf("  🔴 Critical: %d\n", critical))
-		}
-		if high > 0 {
-			sb.WriteString(fmt.Sprintf("  🟠 High: %d\n", high))
-		}
-		if medium > 0 {
-			sb.WriteString(fmt.Sprintf("  🟡 Medium: %d\n", medium))
-		}
-
-		sb.WriteString("\n  💡 Remove secrets from the image before pushing.\n")
-		sb.WriteString("     Use multi-stage builds or .dockerignore to exclude secrets.\n\n")
-
-		p.log("warn", "Blocked %s of %s due to %d secrets found", action, image, result.SecretsFound)
-
-		return &AuthZResponse{
+	} else {
+		// Request denied
+		result.Response = &AuthZResponse{
 			Allow: false,
-			Msg:   sb.String(),
+			Msg:   p.formatDenialMessage(evalResult),
 		}
 	}
 
-	// Secrets found but within policy thresholds - warn but allow
-	p.log("warn", "Image %s contains %d secrets but within policy thresholds", image, result.SecretsFound)
-	return nil
+	return result
+}
+
+// formatCommandSummary creates a readable Docker command from the parsed command
+func (p *Plugin) formatCommandSummary(cmd *interceptor.DockerCommand) string {
+	var parts []string
+	parts = append(parts, "docker", cmd.Action)
+
+	// Add key flags based on action
+	switch cmd.Action {
+	case "run", "create":
+		if cmd.Privileged {
+			parts = append(parts, "--privileged")
+		}
+		if cmd.NetworkMode == "host" {
+			parts = append(parts, "--network", "host")
+		}
+		if cmd.PIDMode == "host" {
+			parts = append(parts, "--pid", "host")
+		}
+		if cmd.User != "" {
+			parts = append(parts, "--user", cmd.User)
+		}
+		for _, v := range cmd.Volumes {
+			// Format volume mount as source:destination
+			volStr := v.Source
+			if v.Destination != "" {
+				volStr = v.Source + ":" + v.Destination
+			}
+			parts = append(parts, "-v", volStr)
+		}
+		for _, cap := range cmd.Capabilities.Add {
+			parts = append(parts, "--cap-add", cap)
+		}
+		if cmd.Image != "" {
+			parts = append(parts, cmd.Image)
+		}
+		if len(cmd.Command) > 0 {
+			parts = append(parts, cmd.Command...)
+		}
+
+	case "exec":
+		if cmd.Privileged {
+			parts = append(parts, "--privileged")
+		}
+		if cmd.User != "" {
+			parts = append(parts, "--user", cmd.User)
+		}
+		if cmd.ContainerName != "" {
+			parts = append(parts, cmd.ContainerName)
+		}
+		if len(cmd.Command) > 0 {
+			parts = append(parts, cmd.Command...)
+		}
+
+	case "build":
+		if cmd.Image != "" {
+			parts = append(parts, "-t", cmd.Image)
+		}
+
+	case "push", "pull":
+		if cmd.Image != "" {
+			parts = append(parts, cmd.Image)
+		}
+
+	default:
+		// For other actions, just include the image/container if available
+		if cmd.Image != "" {
+			parts = append(parts, cmd.Image)
+		}
+		if cmd.ContainerName != "" {
+			parts = append(parts, cmd.ContainerName)
+		}
+	}
+
+	return strings.Join(parts, " ")
 }

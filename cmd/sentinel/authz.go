@@ -147,8 +147,12 @@ func runAuthzStart(cmd *cobra.Command, args []string) error {
 	hotReload, _ := cmd.Flags().GetBool("hot-reload")
 	hotReloadDebounce, _ := cmd.Flags().GetDuration("hot-reload-debounce")
 
-	// Note: If --policy flag is specified, we lock to that policy.
-	// If not specified (policyName == ""), we dynamically follow config.ActivePolicy on reload.
+	// Use active policy from config if not specified on command line
+	if policyName == "" {
+		policyName = cfg.ActivePolicy
+	}
+	fmt.Printf("[DEBUG] ConfigDir=%s, PoliciesDir=%s, ActivePolicy=%s, policyName=%s\n",
+		cfg.ConfigDir, cfg.PoliciesDir, cfg.ActivePolicy, policyName)
 
 	// Check if running as root
 	if os.Geteuid() != 0 {
@@ -177,9 +181,9 @@ func runAuthzStart(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Starting Docker Sentinel authorization plugin...\n")
 	fmt.Printf("  Socket: %s\n", socketPath)
 	if policyName != "" {
-		fmt.Printf("  Policy: %s (locked)\n", policyName)
+		fmt.Printf("  Policy: %s\n", policyName)
 	} else {
-		fmt.Printf("  Policy: %s (follows config)\n", cfg.ActivePolicy)
+		fmt.Printf("  Policy: %s (active)\n", cfg.ActivePolicy)
 	}
 	fmt.Printf("  Mode: %s\n", map[bool]string{true: "fail-open", false: "fail-closed"}[failOpen])
 	if hotReload {

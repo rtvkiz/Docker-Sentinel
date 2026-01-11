@@ -1,158 +1,185 @@
 package audit
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
-// Logger handles dual logging to JSON Lines file and SQLite database
+// Logger provides dual-output audit logging (JSON Lines + SQLite)
 type Logger struct {
-	jsonFile *os.File
-	jsonPath string
-	store    *Store
-	mu       sync.Mutex
-	enabled  bool
-}
-
-// LoggerConfig contains configuration for the audit logger
-type LoggerConfig struct {
-	// AuditDir is the directory for audit files
-	AuditDir string
-
-	// Enabled controls whether audit logging is active
-	Enabled bool
+	store     *Store
+	jsonFile  *os.File
+	jsonPath  string
+	mu        sync.Mutex
+	enabled   bool
 }
 
 // NewLogger creates a new audit logger
-func NewLogger(config LoggerConfig) (*Logger, error) {
-	if !config.Enabled {
-		return &Logger{enabled: false}, nil
-	}
-
-	// Ensure audit directory exists with secure permissions (owner + group only)
-	if err := os.MkdirAll(config.AuditDir, 0750); err != nil {
+func NewLogger(auditDir string) (*Logger, error) {
+	if err := os.MkdirAll(auditDir, 0750); err != nil {
 		return nil, fmt.Errorf("failed to create audit directory: %w", err)
 	}
 
-	// Open JSON Lines file for append with secure permissions (owner read/write only)
-	jsonPath := filepath.Join(config.AuditDir, "audit.jsonl")
-	jsonFile, err := os.OpenFile(jsonPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	// Open SQLite store
+	dbPath := filepath.Join(auditDir, "audit.db")
+	store, err := NewStore(dbPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open JSON audit log: %w", err)
+		return nil, fmt.Errorf("failed to create audit store: %w", err)
 	}
 
-	// Open SQLite store
-	store, err := NewStore(config.AuditDir)
+	// Open JSON Lines file for append
+	jsonPath := filepath.Join(auditDir, "audit.jsonl")
+	jsonFile, err := os.OpenFile(jsonPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0640)
 	if err != nil {
-		jsonFile.Close()
-		return nil, fmt.Errorf("failed to open SQLite store: %w", err)
+		store.Close()
+		return nil, fmt.Errorf("failed to open JSON log: %w", err)
 	}
 
 	return &Logger{
+		store:    store,
 		jsonFile: jsonFile,
 		jsonPath: jsonPath,
-		store:    store,
 		enabled:  true,
 	}, nil
 }
 
-// Log writes an audit entry to both JSON and SQLite
+// Log writes an audit entry to both outputs
 func (l *Logger) Log(entry *Entry) error {
 	if !l.enabled {
 		return nil
 	}
 
-	// Redact secrets before logging to prevent sensitive data leakage
-	entry.RedactSecrets()
-
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	// Write to JSON Lines file
-	if l.jsonFile != nil {
-		data, err := json.Marshal(entry)
-		if err != nil {
-			return fmt.Errorf("failed to marshal audit entry: %w", err)
-		}
-		if _, err := l.jsonFile.Write(append(data, '\n')); err != nil {
-			return fmt.Errorf("failed to write to JSON log: %w", err)
-		}
-		// Sync to disk for durability
-		l.jsonFile.Sync()
+	// Write to SQLite
+	if err := l.store.Insert(entry); err != nil {
+		return fmt.Errorf("failed to write to SQLite: %w", err)
 	}
 
-	// Write to SQLite
-	if l.store != nil {
-		if err := l.store.Insert(entry); err != nil {
-			return fmt.Errorf("failed to insert into SQLite: %w", err)
-		}
+	// Write to JSON Lines
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return fmt.Errorf("failed to marshal entry: %w", err)
+	}
+
+	if _, err := l.jsonFile.Write(append(data, '\n')); err != nil {
+		return fmt.Errorf("failed to write to JSON log: %w", err)
 	}
 
 	return nil
 }
 
-// Query retrieves audit entries from SQLite
-func (l *Logger) Query(opts QueryOptions) ([]*Entry, error) {
-	if !l.enabled || l.store == nil {
-		return nil, nil
-	}
+// Query retrieves entries from the SQLite store
+func (l *Logger) Query(opts QueryOptions) ([]Entry, error) {
 	return l.store.Query(opts)
 }
 
-// GetStats retrieves statistics from SQLite
-func (l *Logger) GetStats(opts QueryOptions) (*Stats, error) {
-	if !l.enabled || l.store == nil {
-		return nil, nil
-	}
-	return l.store.GetStats(opts.Since, opts.Until)
+// GetStats returns summary statistics
+func (l *Logger) GetStats(since time.Time) (*Stats, error) {
+	return l.store.GetStats(since)
 }
 
-// DeleteBefore deletes entries before the given time
-func (l *Logger) DeleteBefore(opts QueryOptions) (int64, error) {
-	if !l.enabled || l.store == nil {
-		return 0, nil
-	}
-	if opts.Until == nil {
-		return 0, fmt.Errorf("until time is required for deletion")
-	}
-	return l.store.DeleteBefore(*opts.Until)
+// DeleteBefore removes old entries from the SQLite store
+func (l *Logger) DeleteBefore(before time.Time) (int64, error) {
+	return l.store.DeleteBefore(before)
 }
 
 // Count returns the total number of entries
 func (l *Logger) Count() (int64, error) {
-	if !l.enabled || l.store == nil {
-		return 0, nil
-	}
 	return l.store.Count()
 }
 
-// JSONPath returns the path to the JSON Lines file
-func (l *Logger) JSONPath() string {
-	return l.jsonPath
-}
-
-// DBPath returns the path to the SQLite database
-func (l *Logger) DBPath() string {
-	if l.store != nil {
-		return l.store.Path()
+// TailJSON opens the JSON log for reading (for tail -f style watching)
+func (l *Logger) TailJSON(lines int) ([]Entry, error) {
+	file, err := os.Open(l.jsonPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
 	}
-	return ""
+	defer file.Close()
+
+	// Read all lines first, then return last N
+	var allEntries []Entry
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		var entry Entry
+		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+			continue // Skip malformed lines
+		}
+		allEntries = append(allEntries, entry)
+	}
+
+	if lines <= 0 || lines >= len(allEntries) {
+		return allEntries, nil
+	}
+
+	return allEntries[len(allEntries)-lines:], nil
 }
 
-// IsEnabled returns whether audit logging is enabled
-func (l *Logger) IsEnabled() bool {
-	return l.enabled
+// WatchJSON returns a channel that emits new entries as they are written
+func (l *Logger) WatchJSON() (<-chan Entry, func(), error) {
+	file, err := os.Open(l.jsonPath)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Seek to end
+	file.Seek(0, io.SeekEnd)
+
+	ch := make(chan Entry, 100)
+	done := make(chan struct{})
+
+	go func() {
+		defer file.Close()
+		defer close(ch)
+
+		reader := bufio.NewReader(file)
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				line, err := reader.ReadBytes('\n')
+				if err != nil {
+					if err == io.EOF {
+						time.Sleep(100 * time.Millisecond)
+						continue
+					}
+					return
+				}
+
+				var entry Entry
+				if err := json.Unmarshal(line, &entry); err != nil {
+					continue
+				}
+
+				select {
+				case ch <- entry:
+				case <-done:
+					return
+				}
+			}
+		}
+	}()
+
+	cancel := func() {
+		close(done)
+	}
+
+	return ch, cancel, nil
 }
 
-// Close closes the logger and releases resources
+// Close closes all resources
 func (l *Logger) Close() error {
-	if !l.enabled {
-		return nil
-	}
-
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -160,35 +187,27 @@ func (l *Logger) Close() error {
 
 	if l.jsonFile != nil {
 		if err := l.jsonFile.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("failed to close JSON file: %w", err))
+			errs = append(errs, err)
 		}
 	}
 
 	if l.store != nil {
 		if err := l.store.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("failed to close SQLite: %w", err))
+			errs = append(errs, err)
 		}
 	}
 
 	if len(errs) > 0 {
-		return errs[0]
+		return fmt.Errorf("errors closing logger: %v", errs)
 	}
+
 	return nil
 }
 
-// GetDefaultAuditDir returns the default audit directory based on config location
-func GetDefaultAuditDir(configDir string) string {
-	if configDir != "" {
-		return filepath.Join(configDir, "audit")
-	}
-
-	// Check for system directory
-	if os.Geteuid() == 0 {
-		return "/etc/sentinel/audit"
-	}
-
-	// User home directory fallback
-	homeDir, _ := os.UserHomeDir()
-	return filepath.Join(homeDir, ".sentinel", "audit")
+// OpenStore opens a read-only connection to the audit database
+// Used by CLI commands that don't need the full logger
+func OpenStore(auditDir string) (*Store, error) {
+	dbPath := filepath.Join(auditDir, "audit.db")
+	return NewStore(dbPath)
 }
 

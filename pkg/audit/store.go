@@ -4,96 +4,75 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
 
-// Store handles SQLite storage for audit entries
+// Store handles SQLite storage for audit logs
 type Store struct {
-	db     *sql.DB
-	dbPath string
+	db *sql.DB
 }
 
 // NewStore creates a new SQLite audit store
-func NewStore(auditDir string) (*Store, error) {
-	// Ensure audit directory exists with secure permissions
-	if err := os.MkdirAll(auditDir, 0750); err != nil {
-		return nil, fmt.Errorf("failed to create audit directory: %w", err)
-	}
-
-	dbPath := filepath.Join(auditDir, "audit.db")
-
-	// Check if database file exists
-	dbExists := false
-	if _, err := os.Stat(dbPath); err == nil {
-		dbExists = true
-	}
-
-	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_busy_timeout=5000")
+func NewStore(dbPath string) (*Store, error) {
+	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_synchronous=NORMAL")
 	if err != nil {
-		return nil, fmt.Errorf("failed to open audit database: %w", err)
+		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
-	// Set secure permissions on new database file
-	if !dbExists {
-		if err := os.Chmod(dbPath, 0600); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("failed to set database permissions: %w", err)
-		}
-	}
-
-	store := &Store{
-		db:     db,
-		dbPath: dbPath,
-	}
-
-	// Initialize schema
-	if err := store.initSchema(); err != nil {
+	store := &Store{db: db}
+	if err := store.init(); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("failed to initialize schema: %w", err)
+		return nil, err
 	}
 
 	return store, nil
 }
 
-// initSchema creates the audit table if it doesn't exist
-func (s *Store) initSchema() error {
+// init creates the audit table if it doesn't exist
+func (s *Store) init() error {
 	schema := `
-	CREATE TABLE IF NOT EXISTS audit_entries (
+	CREATE TABLE IF NOT EXISTS audit_log (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		timestamp DATETIME NOT NULL,
-		user TEXT NOT NULL DEFAULT '',
+		user TEXT NOT NULL,
 		method TEXT NOT NULL,
 		uri TEXT NOT NULL,
-		image TEXT DEFAULT '',
-		command TEXT DEFAULT '',
-		risk_score INTEGER DEFAULT 0,
+		image TEXT,
+		command TEXT,
+		risk_score INTEGER NOT NULL,
 		decision TEXT NOT NULL,
-		reason TEXT DEFAULT '',
-		duration_ms INTEGER DEFAULT 0,
-		policy TEXT DEFAULT '',
-		violations TEXT DEFAULT '[]'
+		reason TEXT,
+		duration_ms INTEGER NOT NULL,
+		policy TEXT,
+		violations TEXT
 	);
-
-	CREATE INDEX IF NOT EXISTS idx_timestamp ON audit_entries(timestamp);
-	CREATE INDEX IF NOT EXISTS idx_user ON audit_entries(user);
-	CREATE INDEX IF NOT EXISTS idx_decision ON audit_entries(decision);
+	
+	CREATE INDEX IF NOT EXISTS idx_timestamp ON audit_log(timestamp);
+	CREATE INDEX IF NOT EXISTS idx_user ON audit_log(user);
+	CREATE INDEX IF NOT EXISTS idx_decision ON audit_log(decision);
 	`
 
 	_, err := s.db.Exec(schema)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to create schema: %w", err)
+	}
+
+	return nil
 }
 
-// Insert inserts a new audit entry
+// Insert adds a new audit entry to the database
 func (s *Store) Insert(entry *Entry) error {
-	violations, _ := json.Marshal(entry.Violations)
+	violations := ""
+	if len(entry.Violations) > 0 {
+		data, _ := json.Marshal(entry.Violations)
+		violations = string(data)
+	}
 
 	_, err := s.db.Exec(`
-		INSERT INTO audit_entries (timestamp, user, method, uri, image, command, risk_score, decision, reason, duration_ms, policy, violations)
+		INSERT INTO audit_log (timestamp, user, method, uri, image, command, risk_score, decision, reason, duration_ms, policy, violations)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		entry.Timestamp,
@@ -103,103 +82,95 @@ func (s *Store) Insert(entry *Entry) error {
 		entry.Image,
 		entry.Command,
 		entry.RiskScore,
-		entry.Decision,
+		string(entry.Decision),
 		entry.Reason,
 		entry.DurationMs,
 		entry.Policy,
-		string(violations),
+		violations,
 	)
-	return err
+
+	if err != nil {
+		return fmt.Errorf("failed to insert audit entry: %w", err)
+	}
+
+	return nil
 }
 
-// Query retrieves audit entries based on options
-func (s *Store) Query(opts QueryOptions) ([]*Entry, error) {
+// Query retrieves audit entries based on filter options
+func (s *Store) Query(opts QueryOptions) ([]Entry, error) {
 	var conditions []string
 	var args []interface{}
 
-	if opts.Since != nil {
+	if !opts.Since.IsZero() {
 		conditions = append(conditions, "timestamp >= ?")
-		args = append(args, *opts.Since)
+		args = append(args, opts.Since)
 	}
-
-	if opts.Until != nil {
+	if !opts.Until.IsZero() {
 		conditions = append(conditions, "timestamp <= ?")
-		args = append(args, *opts.Until)
+		args = append(args, opts.Until)
 	}
-
 	if opts.User != "" {
 		conditions = append(conditions, "user = ?")
 		args = append(args, opts.User)
 	}
-
 	if opts.Decision != "" {
 		conditions = append(conditions, "decision = ?")
-		args = append(args, opts.Decision)
+		args = append(args, string(opts.Decision))
 	}
 
-	query := "SELECT id, timestamp, user, method, uri, image, command, risk_score, decision, reason, duration_ms, policy, violations FROM audit_entries"
-
+	query := "SELECT id, timestamp, user, method, uri, image, command, risk_score, decision, reason, duration_ms, policy, violations FROM audit_log"
 	if len(conditions) > 0 {
 		query += " WHERE " + strings.Join(conditions, " AND ")
 	}
-
-	if opts.OrderDesc {
-		query += " ORDER BY timestamp DESC"
-	} else {
-		query += " ORDER BY timestamp ASC"
-	}
+	query += " ORDER BY timestamp DESC"
 
 	if opts.Limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", opts.Limit)
 	}
-
 	if opts.Offset > 0 {
 		query += fmt.Sprintf(" OFFSET %d", opts.Offset)
 	}
 
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query audit entries: %w", err)
+		return nil, fmt.Errorf("failed to query audit log: %w", err)
 	}
 	defer rows.Close()
 
-	var entries []*Entry
+	var entries []Entry
 	for rows.Next() {
-		entry := &Entry{}
-		var violations string
-		var timestamp string
+		var entry Entry
+		var decisionStr string
+		var violations sql.NullString
+		var image, command, reason, policy sql.NullString
 
 		err := rows.Scan(
 			&entry.ID,
-			&timestamp,
+			&entry.Timestamp,
 			&entry.User,
 			&entry.Method,
 			&entry.URI,
-			&entry.Image,
-			&entry.Command,
+			&image,
+			&command,
 			&entry.RiskScore,
-			&entry.Decision,
-			&entry.Reason,
+			&decisionStr,
+			&reason,
 			&entry.DurationMs,
-			&entry.Policy,
+			&policy,
 			&violations,
 		)
 		if err != nil {
-			return nil, fmt.Errorf("failed to scan audit entry: %w", err)
+			return nil, fmt.Errorf("failed to scan row: %w", err)
 		}
 
-		// Parse timestamp
-		entry.Timestamp, _ = time.Parse("2006-01-02 15:04:05.999999999-07:00", timestamp)
-		if entry.Timestamp.IsZero() {
-			entry.Timestamp, _ = time.Parse("2006-01-02T15:04:05Z", timestamp)
-		}
-		if entry.Timestamp.IsZero() {
-			entry.Timestamp, _ = time.Parse(time.RFC3339, timestamp)
-		}
+		entry.Decision = Decision(decisionStr)
+		entry.Image = image.String
+		entry.Command = command.String
+		entry.Reason = reason.String
+		entry.Policy = policy.String
 
-		// Parse violations (ignore error - violations field is optional)
-		if violations != "" && violations != "[]" {
-			_ = json.Unmarshal([]byte(violations), &entry.Violations)
+		if violations.Valid && violations.String != "" {
+			json.Unmarshal([]byte(violations.String), &entry.Violations)
 		}
 
 		entries = append(entries, entry)
@@ -208,122 +179,112 @@ func (s *Store) Query(opts QueryOptions) ([]*Entry, error) {
 	return entries, nil
 }
 
-// GetStats retrieves aggregated statistics
-func (s *Store) GetStats(since, until *time.Time) (*Stats, error) {
-	stats := &Stats{}
-
-	var conditions []string
-	var args []interface{}
-
-	if since != nil {
-		conditions = append(conditions, "timestamp >= ?")
-		args = append(args, *since)
-		stats.Since = *since
+// GetStats returns summary statistics for audit logs
+func (s *Store) GetStats(since time.Time) (*Stats, error) {
+	stats := &Stats{
+		StartTime: since,
+		EndTime:   time.Now(),
 	}
 
-	if until != nil {
-		conditions = append(conditions, "timestamp <= ?")
-		args = append(args, *until)
-		stats.Until = *until
-	}
-
-	whereClause := ""
-	if len(conditions) > 0 {
-		whereClause = " WHERE " + strings.Join(conditions, " AND ")
-	}
-
-	// Get total counts
-	row := s.db.QueryRow(`
+	// Get counts by decision
+	query := `
 		SELECT 
 			COUNT(*) as total,
 			SUM(CASE WHEN decision = 'allowed' THEN 1 ELSE 0 END) as allowed,
 			SUM(CASE WHEN decision = 'denied' THEN 1 ELSE 0 END) as denied,
 			SUM(CASE WHEN decision = 'warned' THEN 1 ELSE 0 END) as warned,
-			COUNT(DISTINCT user) as unique_users,
-			COALESCE(AVG(risk_score), 0) as avg_risk,
-			COALESCE(AVG(duration_ms), 0) as avg_duration
-		FROM audit_entries`+whereClause, args...)
+			AVG(risk_score) as avg_risk,
+			AVG(duration_ms) as avg_duration,
+			COUNT(DISTINCT user) as unique_users
+		FROM audit_log
+		WHERE timestamp >= ?
+	`
 
-	err := row.Scan(
+	var avgRisk, avgDuration sql.NullFloat64
+	err := s.db.QueryRow(query, since).Scan(
 		&stats.TotalRequests,
-		&stats.AllowedCount,
-		&stats.DeniedCount,
-		&stats.WarnedCount,
+		&stats.Allowed,
+		&stats.Denied,
+		&stats.Warned,
+		&avgRisk,
+		&avgDuration,
 		&stats.UniqueUsers,
-		&stats.AvgRiskScore,
-		&stats.AvgDurationMs,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get stats: %w", err)
 	}
 
+	stats.AvgRiskScore = avgRisk.Float64
+	stats.AvgDurationMs = avgDuration.Float64
+
 	// Get top users
-	rows, err := s.db.Query(`
-		SELECT user, COUNT(*) as count,
-			SUM(CASE WHEN decision = 'denied' THEN 1 ELSE 0 END) as denied,
-			SUM(CASE WHEN decision = 'allowed' THEN 1 ELSE 0 END) as allowed
-		FROM audit_entries`+whereClause+`
+	userQuery := `
+		SELECT user, COUNT(*) as requests, SUM(CASE WHEN decision = 'denied' THEN 1 ELSE 0 END) as denied
+		FROM audit_log
+		WHERE timestamp >= ?
 		GROUP BY user
-		ORDER BY count DESC
-		LIMIT 10`, args...)
-	if err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var us UserStat
-			if err := rows.Scan(&us.User, &us.Count, &us.Denied, &us.Allowed); err != nil {
-				continue // Skip malformed rows
-			}
-			stats.TopUsers = append(stats.TopUsers, us)
+		ORDER BY requests DESC
+		LIMIT 5
+	`
+	rows, err := s.db.Query(userQuery, since)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get top users: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var user UserStat
+		if err := rows.Scan(&user.Name, &user.Requests, &user.Denied); err != nil {
+			return nil, err
 		}
+		stats.TopUsers = append(stats.TopUsers, user)
 	}
 
 	// Get top denial reasons
-	rows, err = s.db.Query(`
+	denialQuery := `
 		SELECT reason, COUNT(*) as count
-		FROM audit_entries
-		WHERE decision = 'denied'`+strings.Replace(whereClause, "WHERE", " AND ", 1)+`
+		FROM audit_log
+		WHERE timestamp >= ? AND decision = 'denied' AND reason != ''
 		GROUP BY reason
 		ORDER BY count DESC
-		LIMIT 10`, args...)
-	if err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var rs ReasonStat
-			if err := rows.Scan(&rs.Reason, &rs.Count); err != nil {
-				continue // Skip malformed rows
-			}
-			if rs.Reason != "" {
-				stats.TopDeniedReasons = append(stats.TopDeniedReasons, rs)
-			}
+		LIMIT 5
+	`
+	rows2, err := s.db.Query(denialQuery, since)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get top denials: %w", err)
+	}
+	defer rows2.Close()
+
+	for rows2.Next() {
+		var reason ReasonStat
+		if err := rows2.Scan(&reason.Reason, &reason.Count); err != nil {
+			return nil, err
 		}
+		stats.TopDenials = append(stats.TopDenials, reason)
 	}
 
 	return stats, nil
 }
 
-// DeleteBefore deletes entries before the given time
+// DeleteBefore removes entries older than the specified time
 func (s *Store) DeleteBefore(before time.Time) (int64, error) {
-	result, err := s.db.Exec("DELETE FROM audit_entries WHERE timestamp < ?", before)
+	result, err := s.db.Exec("DELETE FROM audit_log WHERE timestamp < ?", before)
 	if err != nil {
-		return 0, fmt.Errorf("failed to delete entries: %w", err)
+		return 0, fmt.Errorf("failed to delete old entries: %w", err)
 	}
+
 	return result.RowsAffected()
 }
 
 // Count returns the total number of entries
 func (s *Store) Count() (int64, error) {
 	var count int64
-	err := s.db.QueryRow("SELECT COUNT(*) FROM audit_entries").Scan(&count)
+	err := s.db.QueryRow("SELECT COUNT(*) FROM audit_log").Scan(&count)
 	return count, err
 }
 
 // Close closes the database connection
 func (s *Store) Close() error {
 	return s.db.Close()
-}
-
-// Path returns the database file path
-func (s *Store) Path() string {
-	return s.dbPath
 }
 

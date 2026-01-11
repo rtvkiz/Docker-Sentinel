@@ -8,7 +8,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,7 +18,6 @@ import (
 )
 
 // maxRequestBodySize limits request body size to prevent DoS attacks
-// Docker authorization requests are typically small (a few KB at most)
 const maxRequestBodySize = 1 * 1024 * 1024 // 1 MB
 
 // Server handles the Docker authorization plugin HTTP server
@@ -66,10 +67,9 @@ func (s *Server) Start() error {
 	}
 	s.mu.Unlock()
 
-	// Ensure plugin directory exists with restricted permissions
-	// 0750 allows root + docker group access
+	// Ensure plugin directory exists
 	pluginDir := filepath.Dir(s.socketPath)
-	if err := os.MkdirAll(pluginDir, 0750); err != nil {
+	if err := os.MkdirAll(pluginDir, 0755); err != nil {
 		return fmt.Errorf("failed to create plugin directory %s: %w", pluginDir, err)
 	}
 
@@ -166,10 +166,6 @@ func (s *Server) handleAuthZReq(w http.ResponseWriter, r *http.Request) {
 		s.respondError(w, "failed to read request body", err)
 		return
 	}
-	if int64(len(body)) >= maxRequestBodySize {
-		s.respondError(w, "request body too large", fmt.Errorf("exceeds %d bytes", maxRequestBodySize))
-		return
-	}
 
 	// Parse authorization request
 	var req AuthZRequest
@@ -178,8 +174,11 @@ func (s *Server) handleAuthZReq(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Detect user from multiple sources
+	detectedUser := s.detectUser(&req)
+
 	// Log the request
-	s.plugin.log("debug", "AuthZReq: user=%s method=%s uri=%s", req.User, req.RequestMethod, req.RequestURI)
+	s.plugin.log("debug", "AuthZReq: user=%s method=%s uri=%s", detectedUser, req.RequestMethod, req.RequestURI)
 
 	// Delegate to plugin for authorization decision with audit info
 	result := s.plugin.AuthZReqWithAudit(&req)
@@ -208,7 +207,7 @@ func (s *Server) handleAuthZReq(w http.ResponseWriter, r *http.Request) {
 
 	auditEntry := &audit.Entry{
 		Timestamp:  startTime,
-		User:       req.User,
+		User:       detectedUser,
 		Method:     req.RequestMethod,
 		URI:        req.RequestURI,
 		Image:      result.Image,
@@ -233,15 +232,10 @@ func (s *Server) handleAuthZReq(w http.ResponseWriter, r *http.Request) {
 
 // handleAuthZRes handles post-request authorization
 func (s *Server) handleAuthZRes(w http.ResponseWriter, r *http.Request) {
-	// Read request body with size limit to prevent DoS
-	limitedReader := io.LimitReader(r.Body, maxRequestBodySize)
-	body, err := io.ReadAll(limitedReader)
+	// Read request body
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		s.respondError(w, "failed to read request body", err)
-		return
-	}
-	if int64(len(body)) >= maxRequestBodySize {
-		s.respondError(w, "request body too large", fmt.Errorf("exceeds %d bytes", maxRequestBodySize))
 		return
 	}
 
@@ -273,9 +267,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}
 
-	if err := json.NewEncoder(w).Encode(health); err != nil {
-		s.plugin.log("error", "Failed to encode health response: %v", err)
-	}
+	json.NewEncoder(w).Encode(health)
 }
 
 // respondError sends an error response
@@ -296,6 +288,88 @@ func (s *Server) respondError(w http.ResponseWriter, message string, err error) 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK) // Docker expects 200 OK even for errors
 	json.NewEncoder(w).Encode(response)
+}
+
+// detectUser attempts to identify the user making the Docker request
+// It tries multiple sources in order of preference:
+// 1. Docker's authentication (req.User) - works with TLS client certs
+// 2. Request headers (X-Forwarded-User, X-Remote-User) - works with proxies
+// 3. Container labels (if user passed --label sentinel.user=name)
+// 4. SUDO_USER environment variable (captured if available)
+// 5. Current effective user as fallback
+func (s *Server) detectUser(req *AuthZRequest) string {
+	// 1. Docker's built-in authentication (TLS client certs, etc.)
+	if req.User != "" {
+		return req.User
+	}
+
+	// 2. Check request headers for proxy-forwarded user info
+	if req.RequestHeaders != nil {
+		// Common headers used by authentication proxies
+		headerNames := []string{
+			"X-Forwarded-User",
+			"X-Remote-User",
+			"X-Auth-User",
+			"Remote-User",
+		}
+		for _, header := range headerNames {
+			if u, ok := req.RequestHeaders[header]; ok && u != "" {
+				return u
+			}
+			// Also try lowercase
+			if u, ok := req.RequestHeaders[strings.ToLower(header)]; ok && u != "" {
+				return u
+			}
+		}
+	}
+
+	// 3. Check for user label in container create requests
+	// Users can pass: docker run --label sentinel.user=$(whoami) ...
+	if strings.Contains(req.RequestURI, "/containers/create") && len(req.RequestBody) > 0 {
+		if labelUser := s.extractUserLabel(req.RequestBody); labelUser != "" {
+			return labelUser
+		}
+	}
+
+	// 4. Try SUDO_USER environment variable (set when using sudo)
+	if sudoUser := os.Getenv("SUDO_USER"); sudoUser != "" {
+		return sudoUser
+	}
+
+	// 5. Get current effective user as fallback
+	if currentUser, err := user.Current(); err == nil && currentUser.Username != "" {
+		// If running as root, this will be "root" - not ideal but better than unknown
+		if currentUser.Username != "root" {
+			return currentUser.Username
+		}
+		// For root, try to indicate it's a local user
+		return "local"
+	}
+
+	return "unknown"
+}
+
+// extractUserLabel extracts the sentinel.user label from a container create request
+func (s *Server) extractUserLabel(body []byte) string {
+	// Quick check to avoid parsing if no label present
+	if !strings.Contains(string(body), "sentinel.user") {
+		return ""
+	}
+
+	// Parse just enough to get labels
+	var createReq struct {
+		Labels map[string]string `json:"Labels"`
+	}
+	if err := json.Unmarshal(body, &createReq); err != nil {
+		return ""
+	}
+
+	if createReq.Labels != nil {
+		if u, ok := createReq.Labels["sentinel.user"]; ok {
+			return u
+		}
+	}
+	return ""
 }
 
 // HealthStatus represents the health status of the plugin
