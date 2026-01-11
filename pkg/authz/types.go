@@ -422,6 +422,12 @@ type PluginConfig struct {
 
 	// HotReloadDebounce is the debounce duration for hot reload
 	HotReloadDebounce time.Duration `json:"hot_reload_debounce"`
+
+	// AuditEnabled enables audit logging
+	AuditEnabled bool `json:"audit_enabled"`
+
+	// AuditDir is the directory for audit logs
+	AuditDir string `json:"audit_dir"`
 }
 
 // DefaultPluginConfig returns a default plugin configuration
@@ -436,6 +442,8 @@ func DefaultPluginConfig() *PluginConfig {
 		LogLevel:          "info",
 		HotReload:         true,
 		HotReloadDebounce: 500 * time.Millisecond,
+		AuditEnabled:      true,
+		AuditDir:          "/etc/sentinel/audit",
 	}
 }
 

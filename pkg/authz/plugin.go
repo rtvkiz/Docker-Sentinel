@@ -8,7 +8,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rtvkiz/docker-sentinel/pkg/audit"
 	"github.com/rtvkiz/docker-sentinel/pkg/config"
+	"github.com/rtvkiz/docker-sentinel/pkg/interceptor"
 	"github.com/rtvkiz/docker-sentinel/pkg/policy"
 )
 
@@ -40,12 +42,13 @@ func getDefaultPoliciesDir() string {
 
 // Plugin implements the Docker authorization plugin
 type Plugin struct {
-	config    *PluginConfig
-	policyMgr *policy.Manager
-	evaluator *policy.Evaluator
-	converter *Converter
-	startTime time.Time
-	mu        sync.RWMutex
+	config      *PluginConfig
+	policyMgr   *policy.Manager
+	evaluator   *policy.Evaluator
+	converter   *Converter
+	auditLogger *audit.Logger
+	startTime   time.Time
+	mu          sync.RWMutex
 }
 
 // NewPlugin creates a new authorization plugin
@@ -65,6 +68,23 @@ func NewPlugin(config *PluginConfig) (*Plugin, error) {
 	// Initialize policies directory
 	if err := p.policyMgr.Init(); err != nil {
 		p.log("warn", "Failed to initialize policies directory: %v", err)
+	}
+
+	// Initialize audit logger
+	if config.AuditDir == "" {
+		config.AuditDir = audit.GetDefaultAuditDir(filepath.Dir(config.PoliciesDir))
+	}
+	auditLogger, err := audit.NewLogger(audit.LoggerConfig{
+		AuditDir: config.AuditDir,
+		Enabled:  config.AuditEnabled,
+	})
+	if err != nil {
+		p.log("warn", "Failed to initialize audit logger: %v (audit disabled)", err)
+	} else {
+		p.auditLogger = auditLogger
+		if config.AuditEnabled {
+			p.log("info", "Audit logging enabled (dir: %s)", config.AuditDir)
+		}
 	}
 
 	// Load the active policy
@@ -124,49 +144,111 @@ func (p *Plugin) ReloadPolicy() error {
 	return p.loadPolicy()
 }
 
+// AuthZReqResult contains the authorization result with audit info
+type AuthZReqResult struct {
+	Response   *AuthZResponse
+	RiskScore  int
+	Violations []string
+	Image      string
+	Command    string
+	PolicyName string
+}
+
 // AuthZReq handles pre-request authorization
 func (p *Plugin) AuthZReq(req *AuthZRequest) *AuthZResponse {
+	result := p.AuthZReqWithAudit(req)
+	return result.Response
+}
+
+// AuthZReqWithAudit handles pre-request authorization and returns audit info
+func (p *Plugin) AuthZReqWithAudit(req *AuthZRequest) *AuthZReqResult {
+	result := &AuthZReqResult{
+		Response: &AuthZResponse{Allow: true},
+	}
+
 	// Check if this is a security-relevant request
 	if !p.converter.IsSecurityRelevant(req) {
-		return &AuthZResponse{Allow: true}
+		return result
 	}
 
 	// Convert API request to DockerCommand
 	cmd, err := p.converter.Convert(req)
 	if err != nil {
-		return p.handleConversionError(req, err)
+		result.Response = p.handleConversionError(req, err)
+		return result
 	}
+
+	// Capture command info for audit
+	result.Image = cmd.Image
+	result.Command = p.formatCommandSummary(cmd)
 
 	// Evaluate against policy
 	p.mu.RLock()
 	evaluator := p.evaluator
+	policyName := p.config.PolicyName
 	p.mu.RUnlock()
 
 	if evaluator == nil {
-		return p.handleError(req, "no policy evaluator available")
+		result.Response = p.handleError(req, "no policy evaluator available")
+		return result
 	}
 
-	result, err := evaluator.Evaluate(cmd)
+	evalResult, err := evaluator.Evaluate(cmd)
 	if err != nil {
-		return p.handleEvaluationError(req, err)
+		result.Response = p.handleEvaluationError(req, err)
+		return result
+	}
+
+	// Capture evaluation results for audit
+	result.RiskScore = evalResult.Score
+	result.PolicyName = policyName
+	for _, v := range evalResult.Violations {
+		result.Violations = append(result.Violations, v.Message)
 	}
 
 	// Determine response
-	if result.Allowed {
+	if evalResult.Allowed {
 		// Check for warnings
-		if len(result.Warnings) > 0 {
-			return &AuthZResponse{
-				Allow: true,
-				Msg:   p.formatWarnings(result.Warnings),
+		if len(evalResult.Warnings) > 0 {
+			for _, w := range evalResult.Warnings {
+				result.Violations = append(result.Violations, w.Message)
 			}
+			result.Response = &AuthZResponse{
+				Allow: true,
+				Msg:   p.formatWarnings(evalResult.Warnings),
+			}
+			return result
 		}
-		return &AuthZResponse{Allow: true}
+		result.Response = &AuthZResponse{Allow: true}
+		return result
 	}
 
 	// Request denied
-	return &AuthZResponse{
+	result.Response = &AuthZResponse{
 		Allow: false,
-		Msg:   p.formatDenialMessage(result),
+		Msg:   p.formatDenialMessage(evalResult),
+	}
+	return result
+}
+
+// formatCommandSummary creates a brief summary of the docker command
+func (p *Plugin) formatCommandSummary(cmd *interceptor.DockerCommand) string {
+	if cmd == nil {
+		return ""
+	}
+	summary := cmd.Action
+	if cmd.Image != "" {
+		summary += " " + cmd.Image
+	}
+	return summary
+}
+
+// LogAuditEntry logs an audit entry for the request
+func (p *Plugin) LogAuditEntry(entry *audit.Entry) {
+	if p.auditLogger != nil {
+		if err := p.auditLogger.Log(entry); err != nil {
+			p.log("error", "Failed to log audit entry: %v", err)
+		}
 	}
 }
 
@@ -315,5 +397,8 @@ func (p *Plugin) log(level, format string, args ...interface{}) {
 
 // Close cleans up plugin resources
 func (p *Plugin) Close() error {
+	if p.auditLogger != nil {
+		return p.auditLogger.Close()
+	}
 	return nil
 }

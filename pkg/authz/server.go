@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/rtvkiz/docker-sentinel/pkg/audit"
 )
 
 // Server handles the Docker authorization plugin HTTP server
@@ -169,16 +171,48 @@ func (s *Server) handleAuthZReq(w http.ResponseWriter, r *http.Request) {
 	// Log the request
 	s.plugin.log("debug", "AuthZReq: user=%s method=%s uri=%s", req.User, req.RequestMethod, req.RequestURI)
 
-	// Delegate to plugin for authorization decision
-	response := s.plugin.AuthZReq(&req)
+	// Delegate to plugin for authorization decision with audit info
+	result := s.plugin.AuthZReqWithAudit(&req)
+	response := result.Response
+
+	// Calculate duration
+	duration := time.Since(startTime)
 
 	// Log the decision
-	duration := time.Since(startTime)
 	if response.Allow {
 		s.plugin.log("debug", "AuthZReq allowed in %v: %s %s", duration, req.RequestMethod, req.RequestURI)
 	} else {
 		s.plugin.log("info", "AuthZReq denied in %v: %s %s - %s", duration, req.RequestMethod, req.RequestURI, response.Msg)
 	}
+
+	// Create audit entry
+	decision := audit.DecisionAllowed
+	reason := ""
+	if !response.Allow {
+		decision = audit.DecisionDenied
+		reason = response.Msg
+	} else if len(result.Violations) > 0 {
+		decision = audit.DecisionWarned
+		reason = response.Msg
+	}
+
+	auditEntry := &audit.Entry{
+		Timestamp:  startTime,
+		User:       req.User,
+		Method:     req.RequestMethod,
+		URI:        req.RequestURI,
+		Image:      result.Image,
+		Command:    result.Command,
+		RiskScore:  result.RiskScore,
+		Decision:   decision,
+		Reason:     reason,
+		DurationMs: duration.Milliseconds(),
+		Policy:     result.PolicyName,
+		Violations: result.Violations,
+	}
+
+	// Log audit entry
+	s.plugin.LogAuditEntry(auditEntry)
 
 	// Send response
 	w.Header().Set("Content-Type", "application/json")

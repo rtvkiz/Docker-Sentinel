@@ -260,7 +260,7 @@ func init() {
 
 	// Build command tree
 	policyCmd.AddCommand(policyShowCmd, policyLoadCmd, policyListCmd, policyEditCmd, policyCreateCmd, policyUseCmd, policyValidateCmd, policyDeleteCmd)
-	rootCmd.AddCommand(execCmd, validateCmd, scanCmd, scanSecretsCmd, installCmd, policyCmd, authzCmd)
+	rootCmd.AddCommand(execCmd, validateCmd, scanCmd, scanSecretsCmd, installCmd, policyCmd, authzCmd, auditCmd)
 }
 
 func initConfig() {

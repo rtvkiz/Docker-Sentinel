@@ -1,0 +1,65 @@
+version: "1.0"
+name: testing
+description: "Testing policy - permissive but with secret detection enabled"
+mode: warn
+
+settings:
+  max_risk_score: 80
+  require_image_scan: false
+
+  secret_scanning:
+    enabled: true
+    block_on_verified: true
+    max_critical: 0
+    max_high: 0
+
+rules:
+  privileged:
+    action: warn
+    message: "Privileged mode detected"
+
+  host_namespaces:
+    network:
+      action: warn
+    pid:
+      action: warn
+    ipc:
+      action: warn
+    uts:
+      action: warn
+
+  capabilities:
+    default_action: warn
+    blocked: []
+
+  mounts:
+    blocked:
+      - path: "/"
+        message: "Host root access"
+    warned:
+      - path: "/var/run/docker.sock"
+      - path: "/etc"
+      - path: "/proc"
+
+  security_options:
+    require_seccomp: false
+    require_apparmor: false
+
+  container:
+    require_non_root: false
+    require_resource_limits: false
+
+  images:
+    block_latest_tag: false
+    allowed_registries: []
+
+  environment:
+    block_secrets: true
+    secret_patterns:
+      - PASSWORD
+      - TOKEN
+      - API_KEY
+      - SECRET
+      - PRIVATE_KEY
+      - AWS_ACCESS
+      - AWS_SECRET
