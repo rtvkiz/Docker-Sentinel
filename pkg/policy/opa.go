@@ -6,10 +6,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/open-policy-agent/opa/rego"
 	"github.com/rtvkiz/docker-sentinel/pkg/interceptor"
 )
+
+// OPA evaluation timeout to prevent DoS via expensive policies
+const opaEvalTimeout = 5 * time.Second
 
 // OPAEngine evaluates Rego policies
 type OPAEngine struct {
@@ -98,11 +102,18 @@ func (o *OPAEngine) Evaluate(cmd *interceptor.DockerCommand) (*OPAResult, error)
 
 	// Convert command to input format for OPA
 	input := commandToOPAInput(cmd)
-	ctx := context.Background()
+
+	// Use timeout context to prevent DoS via expensive policies
+	ctx, cancel := context.WithTimeout(context.Background(), opaEvalTimeout)
+	defer cancel()
 
 	for name, query := range o.policies {
 		results, err := query.Eval(ctx, rego.EvalInput(input))
 		if err != nil {
+			// Check if timeout was exceeded
+			if ctx.Err() == context.DeadlineExceeded {
+				return nil, fmt.Errorf("policy evaluation timed out after %v", opaEvalTimeout)
+			}
 			return nil, fmt.Errorf("failed to evaluate policy %s: %w", name, err)
 		}
 
@@ -332,14 +343,15 @@ warn[msg] {
 
 // CreateDefaultRegoFiles creates default Rego policy files
 func CreateDefaultRegoFiles(dir string) error {
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0750); err != nil {
 		return err
 	}
 
 	for name, content := range DefaultPolicies() {
 		path := filepath.Join(dir, name+".rego")
 		if _, err := os.Stat(path); os.IsNotExist(err) {
-			if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+			// Use secure file permissions (owner read/write only)
+			if err := os.WriteFile(path, []byte(content), 0600); err != nil {
 				return err
 			}
 		}

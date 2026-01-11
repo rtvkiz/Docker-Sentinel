@@ -20,15 +20,30 @@ type Store struct {
 
 // NewStore creates a new SQLite audit store
 func NewStore(auditDir string) (*Store, error) {
-	// Ensure audit directory exists
-	if err := os.MkdirAll(auditDir, 0755); err != nil {
+	// Ensure audit directory exists with secure permissions
+	if err := os.MkdirAll(auditDir, 0750); err != nil {
 		return nil, fmt.Errorf("failed to create audit directory: %w", err)
 	}
 
 	dbPath := filepath.Join(auditDir, "audit.db")
+
+	// Check if database file exists
+	dbExists := false
+	if _, err := os.Stat(dbPath); err == nil {
+		dbExists = true
+	}
+
 	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_busy_timeout=5000")
 	if err != nil {
 		return nil, fmt.Errorf("failed to open audit database: %w", err)
+	}
+
+	// Set secure permissions on new database file
+	if !dbExists {
+		if err := os.Chmod(dbPath, 0600); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("failed to set database permissions: %w", err)
+		}
 	}
 
 	store := &Store{
@@ -182,9 +197,9 @@ func (s *Store) Query(opts QueryOptions) ([]*Entry, error) {
 			entry.Timestamp, _ = time.Parse(time.RFC3339, timestamp)
 		}
 
-		// Parse violations
+		// Parse violations (ignore error - violations field is optional)
 		if violations != "" && violations != "[]" {
-			json.Unmarshal([]byte(violations), &entry.Violations)
+			_ = json.Unmarshal([]byte(violations), &entry.Violations)
 		}
 
 		entries = append(entries, entry)
@@ -255,7 +270,9 @@ func (s *Store) GetStats(since, until *time.Time) (*Stats, error) {
 		defer rows.Close()
 		for rows.Next() {
 			var us UserStat
-			rows.Scan(&us.User, &us.Count, &us.Denied, &us.Allowed)
+			if err := rows.Scan(&us.User, &us.Count, &us.Denied, &us.Allowed); err != nil {
+				continue // Skip malformed rows
+			}
 			stats.TopUsers = append(stats.TopUsers, us)
 		}
 	}
@@ -272,7 +289,9 @@ func (s *Store) GetStats(since, until *time.Time) (*Stats, error) {
 		defer rows.Close()
 		for rows.Next() {
 			var rs ReasonStat
-			rows.Scan(&rs.Reason, &rs.Count)
+			if err := rows.Scan(&rs.Reason, &rs.Count); err != nil {
+				continue // Skip malformed rows
+			}
 			if rs.Reason != "" {
 				stats.TopDeniedReasons = append(stats.TopDeniedReasons, rs)
 			}

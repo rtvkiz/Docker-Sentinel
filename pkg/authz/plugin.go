@@ -9,9 +9,10 @@ import (
 	"time"
 
 	"github.com/rtvkiz/docker-sentinel/pkg/audit"
-	"github.com/rtvkiz/docker-sentinel/pkg/config"
+	appconfig "github.com/rtvkiz/docker-sentinel/pkg/config"
 	"github.com/rtvkiz/docker-sentinel/pkg/interceptor"
 	"github.com/rtvkiz/docker-sentinel/pkg/policy"
+	"github.com/rtvkiz/docker-sentinel/pkg/scanner"
 )
 
 // getDefaultPoliciesDir returns the policies directory based on priority:
@@ -42,13 +43,14 @@ func getDefaultPoliciesDir() string {
 
 // Plugin implements the Docker authorization plugin
 type Plugin struct {
-	config      *PluginConfig
-	policyMgr   *policy.Manager
-	evaluator   *policy.Evaluator
-	converter   *Converter
-	auditLogger *audit.Logger
-	startTime   time.Time
-	mu          sync.RWMutex
+	config        *PluginConfig
+	policyMgr     *policy.Manager
+	evaluator     *policy.Evaluator
+	converter     *Converter
+	auditLogger   *audit.Logger
+	secretScanner *scanner.TruffleHogScanner
+	startTime     time.Time
+	mu            sync.RWMutex
 }
 
 // NewPlugin creates a new authorization plugin
@@ -58,6 +60,10 @@ func NewPlugin(config *PluginConfig) (*Plugin, error) {
 		converter: NewConverter(),
 		startTime: time.Now(),
 	}
+
+	// Initialize secret scanner (TruffleHog)
+	scannerCfg := &appconfig.Config{}
+	p.secretScanner = scanner.NewTruffleHogScanner(scannerCfg)
 
 	// Initialize policy manager with proper path resolution
 	if config.PoliciesDir == "" {
@@ -112,7 +118,7 @@ func (p *Plugin) loadPolicy() error {
 	} else {
 		// Reload config file to get current active_policy setting
 		// This is important for hot reload when user runs "sentinel policy use <name>"
-		cfg, cfgErr := config.Load("")
+		cfg, cfgErr := appconfig.Load("")
 		if cfgErr == nil && cfg.ActivePolicy != "" {
 			// Update the manager's active policy from the config file
 			if setErr := p.policyMgr.SetActive(cfg.ActivePolicy); setErr != nil {
@@ -204,6 +210,15 @@ func (p *Plugin) AuthZReqWithAudit(req *AuthZRequest) *AuthZReqResult {
 	result.PolicyName = policyName
 	for _, v := range evalResult.Violations {
 		result.Violations = append(result.Violations, v.Message)
+	}
+
+	// For push operations, scan the image for secrets before allowing
+	if cmd.Action == "push" && cmd.Image != "" {
+		if secretResponse := p.scanImageForSecrets(cmd.Image, "push"); secretResponse != nil {
+			result.Response = secretResponse
+			result.Violations = append(result.Violations, "Secrets detected in image")
+			return result
+		}
 	}
 
 	// Determine response
@@ -321,9 +336,52 @@ func (p *Plugin) LogAuditEntry(entry *audit.Entry) {
 
 // AuthZRes handles post-request authorization
 func (p *Plugin) AuthZRes(req *AuthZRequest) *AuthZResponse {
-	// Post-request authorization - we typically allow all
-	// This could be extended to filter response data
+	// Check if this is a successful build response
+	if p.isBuildResponse(req) && req.ResponseStatusCode == 200 {
+		// Extract the image tag from the build request
+		image := p.extractBuildTag(req.RequestURI)
+		if image != "" {
+			// Scan the built image for secrets
+			if secretResponse := p.scanImageForSecrets(image, "build"); secretResponse != nil {
+				// For post-build, we can't really block (image is already built)
+				// But we log a warning - the push will be blocked later
+				p.log("warn", "Built image %s contains secrets - push will be blocked", image)
+			}
+		}
+	}
+
+	// Post-request authorization - allow the response through
 	return &AuthZResponse{Allow: true}
+}
+
+// isBuildResponse checks if this is a docker build response
+func (p *Plugin) isBuildResponse(req *AuthZRequest) bool {
+	return req.RequestMethod == "POST" && strings.Contains(req.RequestURI, "/build")
+}
+
+// extractBuildTag extracts the image tag from a build request URI
+// URI format: /v1.xx/build?t=imagename:tag&...
+func (p *Plugin) extractBuildTag(uri string) string {
+	// Parse the query parameters
+	parts := strings.SplitN(uri, "?", 2)
+	if len(parts) != 2 {
+		return ""
+	}
+
+	// Look for the 't' parameter (tag)
+	for _, param := range strings.Split(parts[1], "&") {
+		kv := strings.SplitN(param, "=", 2)
+		if len(kv) == 2 && kv[0] == "t" {
+			// URL decode the tag value
+			tag := kv[1]
+			// Handle URL encoding (basic)
+			tag = strings.ReplaceAll(tag, "%2F", "/")
+			tag = strings.ReplaceAll(tag, "%3A", ":")
+			return tag
+		}
+	}
+
+	return ""
 }
 
 // handleConversionError handles errors during request conversion
@@ -467,5 +525,104 @@ func (p *Plugin) Close() error {
 	if p.auditLogger != nil {
 		return p.auditLogger.Close()
 	}
+	return nil
+}
+
+// scanImageForSecrets runs TruffleHog on an image and returns a denial response if secrets are found
+// Returns nil if no secrets found or scanning is disabled/unavailable
+func (p *Plugin) scanImageForSecrets(image string, action string) *AuthZResponse {
+	if image == "" {
+		return nil
+	}
+
+	// Check if TruffleHog is available
+	if p.secretScanner == nil || !p.secretScanner.Available() {
+		p.log("debug", "TruffleHog not available, skipping secret scan for %s", image)
+		return nil
+	}
+
+	// Get secret scanning settings from policy
+	p.mu.RLock()
+	evaluator := p.evaluator
+	p.mu.RUnlock()
+
+	if evaluator == nil {
+		return nil
+	}
+
+	secretSettings := evaluator.GetSecretScanSettings()
+	if !secretSettings.Enabled {
+		p.log("debug", "Secret scanning disabled in policy, skipping scan for %s", image)
+		return nil
+	}
+
+	p.log("info", "Scanning image for secrets before %s: %s", action, image)
+
+	// Run TruffleHog scan
+	result, err := p.secretScanner.ScanSecrets(image)
+	if err != nil {
+		p.log("warn", "Secret scan failed for %s: %v", image, err)
+		// Don't block on scan failure - just log and continue
+		return nil
+	}
+
+	if result.SecretsFound == 0 {
+		p.log("info", "No secrets found in image: %s", image)
+		return nil
+	}
+
+	// Evaluate scan results against policy
+	evaluation := evaluator.EvaluateSecretScan(result)
+
+	if !evaluation.Allowed {
+		// Build denial message
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("\n\n  🔐 SECRET SCAN BLOCKED %s\n", strings.ToUpper(action)))
+		sb.WriteString("  ─────────────────────────────────────────\n")
+		sb.WriteString(fmt.Sprintf("  Image: %s\n", image))
+		sb.WriteString(fmt.Sprintf("  Secrets Found: %d\n\n", result.SecretsFound))
+
+		// Count by severity
+		critical, high, medium, verified := 0, 0, 0, 0
+		for _, secret := range result.Secrets {
+			if secret.Verified {
+				verified++
+			}
+			switch secret.Severity {
+			case "CRITICAL":
+				critical++
+			case "HIGH":
+				high++
+			case "MEDIUM":
+				medium++
+			}
+		}
+
+		if verified > 0 {
+			sb.WriteString(fmt.Sprintf("  🚫 Verified secrets: %d (confirmed active!)\n", verified))
+		}
+		if critical > 0 {
+			sb.WriteString(fmt.Sprintf("  🔴 Critical: %d\n", critical))
+		}
+		if high > 0 {
+			sb.WriteString(fmt.Sprintf("  🟠 High: %d\n", high))
+		}
+		if medium > 0 {
+			sb.WriteString(fmt.Sprintf("  🟡 Medium: %d\n", medium))
+		}
+
+		sb.WriteString("\n  💡 Remove secrets from the image before pushing.\n")
+		sb.WriteString("     Use multi-stage builds or .dockerignore to exclude secrets.\n\n")
+
+		p.log("warn", "Blocked %s of %s due to %d secrets found", action, image, result.SecretsFound)
+
+		return &AuthZResponse{
+			Allow: false,
+			Msg:   sb.String(),
+		}
+	}
+
+	// Secrets found but within policy thresholds - warn but allow
+	p.log("warn", "Image %s contains %d secrets but within policy thresholds", image, result.SecretsFound)
 	return nil
 }

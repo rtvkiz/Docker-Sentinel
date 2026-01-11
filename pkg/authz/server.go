@@ -15,6 +15,10 @@ import (
 	"github.com/rtvkiz/docker-sentinel/pkg/audit"
 )
 
+// maxRequestBodySize limits request body size to prevent DoS attacks
+// Docker authorization requests are typically small (a few KB at most)
+const maxRequestBodySize = 1 * 1024 * 1024 // 1 MB
+
 // Server handles the Docker authorization plugin HTTP server
 type Server struct {
 	plugin     *Plugin
@@ -62,9 +66,10 @@ func (s *Server) Start() error {
 	}
 	s.mu.Unlock()
 
-	// Ensure plugin directory exists
+	// Ensure plugin directory exists with restricted permissions
+	// 0750 allows root + docker group access
 	pluginDir := filepath.Dir(s.socketPath)
-	if err := os.MkdirAll(pluginDir, 0755); err != nil {
+	if err := os.MkdirAll(pluginDir, 0750); err != nil {
 		return fmt.Errorf("failed to create plugin directory %s: %w", pluginDir, err)
 	}
 
@@ -154,10 +159,15 @@ func (s *Server) handleActivate(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAuthZReq(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
 
-	// Read request body
-	body, err := io.ReadAll(r.Body)
+	// Read request body with size limit to prevent DoS
+	limitedReader := io.LimitReader(r.Body, maxRequestBodySize)
+	body, err := io.ReadAll(limitedReader)
 	if err != nil {
 		s.respondError(w, "failed to read request body", err)
+		return
+	}
+	if int64(len(body)) >= maxRequestBodySize {
+		s.respondError(w, "request body too large", fmt.Errorf("exceeds %d bytes", maxRequestBodySize))
 		return
 	}
 
@@ -223,10 +233,15 @@ func (s *Server) handleAuthZReq(w http.ResponseWriter, r *http.Request) {
 
 // handleAuthZRes handles post-request authorization
 func (s *Server) handleAuthZRes(w http.ResponseWriter, r *http.Request) {
-	// Read request body
-	body, err := io.ReadAll(r.Body)
+	// Read request body with size limit to prevent DoS
+	limitedReader := io.LimitReader(r.Body, maxRequestBodySize)
+	body, err := io.ReadAll(limitedReader)
 	if err != nil {
 		s.respondError(w, "failed to read request body", err)
+		return
+	}
+	if int64(len(body)) >= maxRequestBodySize {
+		s.respondError(w, "request body too large", fmt.Errorf("exceeds %d bytes", maxRequestBodySize))
 		return
 	}
 
@@ -258,7 +273,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}
 
-	json.NewEncoder(w).Encode(health)
+	if err := json.NewEncoder(w).Encode(health); err != nil {
+		s.plugin.log("error", "Failed to encode health response: %v", err)
+	}
 }
 
 // respondError sends an error response

@@ -1,10 +1,61 @@
 package scanner
 
 import (
+	"fmt"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/rtvkiz/docker-sentinel/pkg/config"
 )
+
+// imageNameRegex validates Docker image names
+// Allows: registry/namespace/image:tag or image@digest
+// Format: [registry/][namespace/]image[:tag][@digest]
+var imageNameRegex = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9._/-]*[a-zA-Z0-9])?(:[\w][\w.-]{0,127})?(@sha256:[a-f0-9]{64})?$`)
+
+// ValidateImageName validates a Docker image name for security
+// Prevents command injection and path traversal attacks
+func ValidateImageName(image string) error {
+	if image == "" {
+		return fmt.Errorf("image name cannot be empty")
+	}
+
+	// Max reasonable length for image name
+	if len(image) > 512 {
+		return fmt.Errorf("image name too long (max 512 characters)")
+	}
+
+	// Prevent argument injection (image starting with -)
+	if strings.HasPrefix(image, "-") {
+		return fmt.Errorf("image name cannot start with a dash")
+	}
+
+	// Prevent null bytes
+	if strings.ContainsRune(image, 0) {
+		return fmt.Errorf("image name contains invalid null byte")
+	}
+
+	// Prevent shell metacharacters
+	shellChars := []string{";", "&", "|", "$", "`", "(", ")", "{", "}", "<", ">", "\\", "\"", "'", "\n", "\r", "\t"}
+	for _, char := range shellChars {
+		if strings.Contains(image, char) {
+			return fmt.Errorf("image name contains invalid character: %q", char)
+		}
+	}
+
+	// Prevent path traversal
+	if strings.Contains(image, "..") {
+		return fmt.Errorf("image name contains path traversal sequence")
+	}
+
+	// Validate against regex pattern
+	if !imageNameRegex.MatchString(image) {
+		return fmt.Errorf("image name contains invalid characters or format")
+	}
+
+	return nil
+}
 
 // ImageScanner interface for vulnerability scanners
 type ImageScanner interface {

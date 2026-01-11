@@ -126,7 +126,10 @@ func (c *Converter) convertContainerCreate(req *AuthZRequest) (*interceptor.Dock
 	}
 
 	// Parse query parameters for container name
-	parsedURL, _ := url.Parse(req.RequestURI)
+	parsedURL, err := url.Parse(req.RequestURI)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse request URI: %w", err)
+	}
 	containerName := parsedURL.Query().Get("name")
 
 	cmd := &interceptor.DockerCommand{
@@ -204,7 +207,10 @@ func (c *Converter) convertExecCreate(req *AuthZRequest, containerID string) (*i
 
 // convertBuild converts a build request
 func (c *Converter) convertBuild(req *AuthZRequest) (*interceptor.DockerCommand, error) {
-	parsedURL, _ := url.Parse(req.RequestURI)
+	parsedURL, err := url.Parse(req.RequestURI)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse request URI: %w", err)
+	}
 	query := parsedURL.Query()
 
 	cmd := &interceptor.DockerCommand{
@@ -243,7 +249,10 @@ func (c *Converter) convertBuild(req *AuthZRequest) (*interceptor.DockerCommand,
 
 // convertPull converts an image pull request
 func (c *Converter) convertPull(req *AuthZRequest) (*interceptor.DockerCommand, error) {
-	parsedURL, _ := url.Parse(req.RequestURI)
+	parsedURL, err := url.Parse(req.RequestURI)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse request URI: %w", err)
+	}
 	query := parsedURL.Query()
 
 	image := query.Get("fromImage")
@@ -267,7 +276,10 @@ func (c *Converter) convertPush(req *AuthZRequest, imageName string) (*intercept
 		decodedName = imageName
 	}
 
-	parsedURL, _ := url.Parse(req.RequestURI)
+	parsedURL, err := url.Parse(req.RequestURI)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse request URI: %w", err)
+	}
 	tag := parsedURL.Query().Get("tag")
 
 	image := decodedName
@@ -495,7 +507,11 @@ func formatBytes(bytes int64) string {
 
 // IsSecurityRelevant checks if a request is security-relevant and needs evaluation
 func (c *Converter) IsSecurityRelevant(req *AuthZRequest) bool {
-	action, _, _ := c.parseRequestURI(req.RequestURI)
+	action, _, err := c.parseRequestURI(req.RequestURI)
+	if err != nil {
+		// Treat unparseable requests as non-security-relevant
+		return false
+	}
 
 	// These actions need security evaluation
 	securityRelevantActions := map[string]bool{

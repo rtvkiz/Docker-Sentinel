@@ -197,7 +197,7 @@ func scanSecretsBeforePush(image string, force bool) error {
 			fmt.Println("\033[33m  --force specified, allowing push despite secrets\033[0m")
 		}
 	} else {
-		fmt.Println("\033[32m✓ No secrets found - safe to push\033[0m\n")
+		fmt.Println("\033[32m✓ No secrets found - safe to push\033[0m")
 	}
 
 	return nil

@@ -57,6 +57,11 @@ func findExecutable(name string) string {
 }
 
 func (t *TrivyScanner) Scan(image string, severityFilter string) (*ScanResult, error) {
+	// Validate image name to prevent command injection
+	if err := ValidateImageName(image); err != nil {
+		return nil, fmt.Errorf("invalid image name: %w", err)
+	}
+
 	trivyPath := findExecutable("trivy")
 	if trivyPath == "" {
 		return nil, fmt.Errorf("trivy is not installed")

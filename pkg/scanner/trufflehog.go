@@ -78,6 +78,11 @@ type DockerSource struct {
 
 // ScanSecrets scans an image for secrets using TruffleHog
 func (t *TruffleHogScanner) ScanSecrets(image string) (*SecretScanResult, error) {
+	// Validate image name to prevent command injection
+	if err := ValidateImageName(image); err != nil {
+		return nil, fmt.Errorf("invalid image name: %w", err)
+	}
+
 	trufflehogPath := findExecutable("trufflehog")
 	if trufflehogPath == "" {
 		return nil, fmt.Errorf("trufflehog is not installed. Install with: pip install trufflehog or brew install trufflehog")

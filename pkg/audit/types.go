@@ -1,8 +1,25 @@
 package audit
 
 import (
+	"regexp"
+	"strings"
 	"time"
 )
+
+// secretPatterns matches common secret patterns in text
+var secretPatterns = []*regexp.Regexp{
+	// API keys and tokens (generic patterns)
+	regexp.MustCompile(`(?i)(api[_-]?key|apikey|token|secret|password|passwd|pwd|credential)[=:]["']?[a-zA-Z0-9+/=_-]{8,}["']?`),
+	// AWS keys
+	regexp.MustCompile(`(?i)AKIA[0-9A-Z]{16}`),
+	regexp.MustCompile(`(?i)aws[_-]?(secret[_-]?access[_-]?key|access[_-]?key[_-]?id)[=:]["']?[a-zA-Z0-9+/=]{20,}["']?`),
+	// Base64 encoded values that look like secrets (long strings after = or :)
+	regexp.MustCompile(`(?i)(secret|password|token|key|credential)[=:]([a-zA-Z0-9+/]{32,}={0,2})`),
+	// JWT tokens
+	regexp.MustCompile(`eyJ[a-zA-Z0-9_-]*\.eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*`),
+	// Private keys
+	regexp.MustCompile(`-----BEGIN[A-Z ]*PRIVATE KEY-----`),
+}
 
 // Decision represents the authorization decision
 type Decision string
@@ -53,6 +70,43 @@ type Entry struct {
 
 	// Violations is the list of policy violations (for denied/warned)
 	Violations []string `json:"violations,omitempty"`
+}
+
+// RedactSecrets sanitizes the entry to remove potential secrets
+// This should be called before logging to prevent secret leakage
+func (e *Entry) RedactSecrets() {
+	e.URI = redactString(e.URI)
+	e.Command = redactString(e.Command)
+	e.Reason = redactString(e.Reason)
+
+	// Redact each violation message
+	for i, v := range e.Violations {
+		e.Violations[i] = redactString(v)
+	}
+}
+
+// redactString replaces detected secrets with [REDACTED]
+func redactString(s string) string {
+	if s == "" {
+		return s
+	}
+
+	result := s
+	for _, pattern := range secretPatterns {
+		result = pattern.ReplaceAllStringFunc(result, func(match string) string {
+			// Keep the key name part, redact only the value
+			parts := strings.SplitN(match, "=", 2)
+			if len(parts) == 2 {
+				return parts[0] + "=[REDACTED]"
+			}
+			parts = strings.SplitN(match, ":", 2)
+			if len(parts) == 2 {
+				return parts[0] + ":[REDACTED]"
+			}
+			return "[REDACTED]"
+		})
+	}
+	return result
 }
 
 // QueryOptions contains options for querying audit entries

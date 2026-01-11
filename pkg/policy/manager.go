@@ -60,13 +60,51 @@ func (m *Manager) Init() error {
 
 // Load loads a policy by name
 func (m *Manager) Load(name string) (*Policy, error) {
+	// Validate policy name to prevent path traversal
+	if err := m.validatePolicyName(name); err != nil {
+		return nil, err
+	}
+
 	// Check cache first
 	if policy, ok := m.loadedPolicies[name]; ok {
 		return policy, nil
 	}
 
 	policyPath := filepath.Join(m.policiesDir, name+".yaml")
+
+	// Double-check the resolved path is within policies directory
+	absPath, err := filepath.Abs(policyPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve policy path: %w", err)
+	}
+	absPoliciesDir, err := filepath.Abs(m.policiesDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve policies directory: %w", err)
+	}
+	if !strings.HasPrefix(absPath, absPoliciesDir+string(filepath.Separator)) {
+		return nil, fmt.Errorf("invalid policy name: path traversal detected")
+	}
+
 	return m.LoadFromFile(policyPath)
+}
+
+// validatePolicyName checks if a policy name is safe
+func (m *Manager) validatePolicyName(name string) error {
+	if name == "" {
+		return fmt.Errorf("policy name is required")
+	}
+
+	// Check for path traversal attempts
+	if strings.Contains(name, "..") || strings.Contains(name, "/") || strings.Contains(name, "\\") {
+		return fmt.Errorf("invalid policy name: contains path separator or traversal")
+	}
+
+	// Check for null bytes
+	if strings.ContainsRune(name, 0) {
+		return fmt.Errorf("invalid policy name: contains null byte")
+	}
+
+	return nil
 }
 
 // LoadFromFile loads a policy from a specific file path
@@ -94,8 +132,9 @@ func (m *Manager) LoadFromFile(path string) (*Policy, error) {
 
 // Save saves a policy to the policies directory
 func (m *Manager) Save(policy *Policy) error {
-	if policy.Name == "" {
-		return fmt.Errorf("policy name is required")
+	// Validate policy name to prevent path traversal
+	if err := m.validatePolicyName(policy.Name); err != nil {
+		return err
 	}
 
 	// Validate before saving
@@ -104,6 +143,19 @@ func (m *Manager) Save(policy *Policy) error {
 	}
 
 	policyPath := filepath.Join(m.policiesDir, policy.Name+".yaml")
+
+	// Verify path is within policies directory
+	absPath, err := filepath.Abs(policyPath)
+	if err != nil {
+		return fmt.Errorf("failed to resolve policy path: %w", err)
+	}
+	absPoliciesDir, err := filepath.Abs(m.policiesDir)
+	if err != nil {
+		return fmt.Errorf("failed to resolve policies directory: %w", err)
+	}
+	if !strings.HasPrefix(absPath, absPoliciesDir+string(filepath.Separator)) {
+		return fmt.Errorf("invalid policy name: path traversal detected")
+	}
 
 	data, err := yaml.Marshal(policy)
 	if err != nil {
@@ -114,7 +166,8 @@ func (m *Manager) Save(policy *Policy) error {
 	header := fmt.Sprintf("# Docker Sentinel Policy: %s\n# %s\n\n", policy.Name, policy.Description)
 	data = append([]byte(header), data...)
 
-	if err := os.WriteFile(policyPath, data, 0644); err != nil {
+	// Use secure file permissions (owner read/write only)
+	if err := os.WriteFile(policyPath, data, 0600); err != nil {
 		return fmt.Errorf("failed to write policy file: %w", err)
 	}
 
@@ -126,11 +179,30 @@ func (m *Manager) Save(policy *Policy) error {
 
 // Delete deletes a policy
 func (m *Manager) Delete(name string) error {
+	// Validate policy name to prevent path traversal
+	if err := m.validatePolicyName(name); err != nil {
+		return err
+	}
+
 	if name == "default" {
 		return fmt.Errorf("cannot delete the default policy")
 	}
 
 	policyPath := filepath.Join(m.policiesDir, name+".yaml")
+
+	// Verify path is within policies directory
+	absPath, err := filepath.Abs(policyPath)
+	if err != nil {
+		return fmt.Errorf("failed to resolve policy path: %w", err)
+	}
+	absPoliciesDir, err := filepath.Abs(m.policiesDir)
+	if err != nil {
+		return fmt.Errorf("failed to resolve policies directory: %w", err)
+	}
+	if !strings.HasPrefix(absPath, absPoliciesDir+string(filepath.Separator)) {
+		return fmt.Errorf("invalid policy name: path traversal detected")
+	}
+
 	if err := os.Remove(policyPath); err != nil {
 		return fmt.Errorf("failed to delete policy: %w", err)
 	}
@@ -285,6 +357,14 @@ func (m *Manager) Merge(names ...string) (*Policy, error) {
 }
 
 func mergePolicy(base, overlay *Policy) {
+	// Merge basic fields
+	if overlay.Mode != "" {
+		base.Mode = overlay.Mode
+	}
+	if overlay.Description != "" {
+		base.Description = overlay.Description
+	}
+
 	// Merge settings
 	if overlay.Settings.MaxRiskScore != 0 {
 		base.Settings.MaxRiskScore = overlay.Settings.MaxRiskScore
@@ -293,11 +373,148 @@ func mergePolicy(base, overlay *Policy) {
 		base.Settings.RequireImageScan = true
 	}
 
-	// Merge rules (overlay wins)
+	// Merge image scanning settings
+	if overlay.Settings.ImageScanning.Enabled {
+		base.Settings.ImageScanning.Enabled = true
+	}
+	if len(overlay.Settings.ImageScanning.Scanners) > 0 {
+		base.Settings.ImageScanning.Scanners = overlay.Settings.ImageScanning.Scanners
+	}
+	if overlay.Settings.ImageScanning.MaxCritical != 0 {
+		base.Settings.ImageScanning.MaxCritical = overlay.Settings.ImageScanning.MaxCritical
+	}
+	if overlay.Settings.ImageScanning.MaxHigh != 0 {
+		base.Settings.ImageScanning.MaxHigh = overlay.Settings.ImageScanning.MaxHigh
+	}
+
+	// Merge secret scanning settings
+	if overlay.Settings.SecretScanning.Enabled {
+		base.Settings.SecretScanning.Enabled = true
+	}
+	if overlay.Settings.SecretScanning.BlockOnVerified {
+		base.Settings.SecretScanning.BlockOnVerified = true
+	}
+
+	// Merge privileged rule
 	if overlay.Rules.Privileged.Action != "" {
 		base.Rules.Privileged = overlay.Rules.Privileged
 	}
-	// ... more merging logic
+
+	// Merge host namespace rules
+	if overlay.Rules.HostNamespaces.Network.Action != "" {
+		base.Rules.HostNamespaces.Network = overlay.Rules.HostNamespaces.Network
+	}
+	if overlay.Rules.HostNamespaces.PID.Action != "" {
+		base.Rules.HostNamespaces.PID = overlay.Rules.HostNamespaces.PID
+	}
+	if overlay.Rules.HostNamespaces.IPC.Action != "" {
+		base.Rules.HostNamespaces.IPC = overlay.Rules.HostNamespaces.IPC
+	}
+	if overlay.Rules.HostNamespaces.UTS.Action != "" {
+		base.Rules.HostNamespaces.UTS = overlay.Rules.HostNamespaces.UTS
+	}
+
+	// Merge capability rules
+	if overlay.Rules.Capabilities.DefaultAction != "" {
+		base.Rules.Capabilities.DefaultAction = overlay.Rules.Capabilities.DefaultAction
+	}
+	if overlay.Rules.Capabilities.RequireDropAll {
+		base.Rules.Capabilities.RequireDropAll = true
+	}
+	if len(overlay.Rules.Capabilities.Blocked) > 0 {
+		base.Rules.Capabilities.Blocked = overlay.Rules.Capabilities.Blocked
+	}
+	if len(overlay.Rules.Capabilities.Allowed) > 0 {
+		base.Rules.Capabilities.Allowed = overlay.Rules.Capabilities.Allowed
+	}
+
+	// Merge mount rules
+	if overlay.Rules.Mounts.BlockBindMounts {
+		base.Rules.Mounts.BlockBindMounts = true
+	}
+	if len(overlay.Rules.Mounts.Blocked) > 0 {
+		base.Rules.Mounts.Blocked = overlay.Rules.Mounts.Blocked
+	}
+	if len(overlay.Rules.Mounts.Warned) > 0 {
+		base.Rules.Mounts.Warned = overlay.Rules.Mounts.Warned
+	}
+	if len(overlay.Rules.Mounts.Allowed) > 0 {
+		base.Rules.Mounts.Allowed = overlay.Rules.Mounts.Allowed
+	}
+
+	// Merge security option rules
+	if overlay.Rules.SecurityOptions.RequireSeccomp {
+		base.Rules.SecurityOptions.RequireSeccomp = true
+	}
+	if overlay.Rules.SecurityOptions.RequireApparmor {
+		base.Rules.SecurityOptions.RequireApparmor = true
+	}
+	if overlay.Rules.SecurityOptions.RequireNoNewPrivileges {
+		base.Rules.SecurityOptions.RequireNoNewPrivileges = true
+	}
+
+	// Merge container rules
+	if overlay.Rules.Container.RequireNonRoot {
+		base.Rules.Container.RequireNonRoot = true
+	}
+	if overlay.Rules.Container.RequireReadOnlyRootfs {
+		base.Rules.Container.RequireReadOnlyRootfs = true
+	}
+	if overlay.Rules.Container.RequireResourceLimits {
+		base.Rules.Container.RequireResourceLimits = true
+	}
+	if len(overlay.Rules.Container.BlockedUsers) > 0 {
+		base.Rules.Container.BlockedUsers = overlay.Rules.Container.BlockedUsers
+	}
+
+	// Merge image rules
+	if len(overlay.Rules.Images.AllowedRegistries) > 0 {
+		base.Rules.Images.AllowedRegistries = overlay.Rules.Images.AllowedRegistries
+	}
+	if len(overlay.Rules.Images.BlockedRegistries) > 0 {
+		base.Rules.Images.BlockedRegistries = overlay.Rules.Images.BlockedRegistries
+	}
+	if overlay.Rules.Images.BlockLatestTag {
+		base.Rules.Images.BlockLatestTag = true
+	}
+	if overlay.Rules.Images.RequireDigest {
+		base.Rules.Images.RequireDigest = true
+	}
+
+	// Merge network rules
+	if len(overlay.Rules.Network.AllowedModes) > 0 {
+		base.Rules.Network.AllowedModes = overlay.Rules.Network.AllowedModes
+	}
+	if len(overlay.Rules.Network.BlockedPorts) > 0 {
+		base.Rules.Network.BlockedPorts = overlay.Rules.Network.BlockedPorts
+	}
+	if len(overlay.Rules.Network.RequireDNS) > 0 {
+		base.Rules.Network.RequireDNS = overlay.Rules.Network.RequireDNS
+	}
+
+	// Merge environment rules
+	if overlay.Rules.Environment.BlockSecrets {
+		base.Rules.Environment.BlockSecrets = true
+	}
+	if len(overlay.Rules.Environment.SecretPatterns) > 0 {
+		base.Rules.Environment.SecretPatterns = overlay.Rules.Environment.SecretPatterns
+	}
+	if len(overlay.Rules.Environment.Blocked) > 0 {
+		base.Rules.Environment.Blocked = overlay.Rules.Environment.Blocked
+	}
+	if len(overlay.Rules.Environment.Required) > 0 {
+		base.Rules.Environment.Required = overlay.Rules.Environment.Required
+	}
+
+	// Merge custom rules (append)
+	if len(overlay.CustomRules) > 0 {
+		base.CustomRules = append(base.CustomRules, overlay.CustomRules...)
+	}
+
+	// Merge Rego policies (append)
+	if len(overlay.Rego) > 0 {
+		base.Rego = append(base.Rego, overlay.Rego...)
+	}
 }
 
 // Strict returns a strict security policy

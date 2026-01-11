@@ -32,14 +32,14 @@ func NewLogger(config LoggerConfig) (*Logger, error) {
 		return &Logger{enabled: false}, nil
 	}
 
-	// Ensure audit directory exists
-	if err := os.MkdirAll(config.AuditDir, 0755); err != nil {
+	// Ensure audit directory exists with secure permissions (owner + group only)
+	if err := os.MkdirAll(config.AuditDir, 0750); err != nil {
 		return nil, fmt.Errorf("failed to create audit directory: %w", err)
 	}
 
-	// Open JSON Lines file for append
+	// Open JSON Lines file for append with secure permissions (owner read/write only)
 	jsonPath := filepath.Join(config.AuditDir, "audit.jsonl")
-	jsonFile, err := os.OpenFile(jsonPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	jsonFile, err := os.OpenFile(jsonPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open JSON audit log: %w", err)
 	}
@@ -64,6 +64,9 @@ func (l *Logger) Log(entry *Entry) error {
 	if !l.enabled {
 		return nil
 	}
+
+	// Redact secrets before logging to prevent sensitive data leakage
+	entry.RedactSecrets()
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
