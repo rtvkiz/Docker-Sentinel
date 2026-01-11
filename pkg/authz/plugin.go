@@ -231,16 +231,83 @@ func (p *Plugin) AuthZReqWithAudit(req *AuthZRequest) *AuthZReqResult {
 	return result
 }
 
-// formatCommandSummary creates a brief summary of the docker command
+// formatCommandSummary creates a readable docker command from the parsed command
 func (p *Plugin) formatCommandSummary(cmd *interceptor.DockerCommand) string {
 	if cmd == nil {
 		return ""
 	}
-	summary := cmd.Action
-	if cmd.Image != "" {
-		summary += " " + cmd.Image
+
+	parts := []string{"docker", cmd.Action}
+
+	// Add key flags that are security-relevant
+	if cmd.Privileged {
+		parts = append(parts, "--privileged")
 	}
-	return summary
+	if cmd.NetworkMode == "host" {
+		parts = append(parts, "--net=host")
+	}
+	if cmd.PIDMode == "host" {
+		parts = append(parts, "--pid=host")
+	}
+	if cmd.User != "" {
+		parts = append(parts, "--user", cmd.User)
+	}
+	if cmd.ReadOnlyRootfs {
+		parts = append(parts, "--read-only")
+	}
+
+	// Add capabilities
+	for _, cap := range cmd.Capabilities.Add {
+		parts = append(parts, "--cap-add="+cap)
+	}
+
+	// Add volume mounts (summarized)
+	for _, vol := range cmd.Volumes {
+		if vol.Source != "" && vol.Destination != "" {
+			mount := "-v " + vol.Source + ":" + vol.Destination
+			if vol.ReadOnly {
+				mount += ":ro"
+			}
+			parts = append(parts, mount)
+		}
+	}
+
+	// Add resource limits
+	if cmd.Resources.Memory != "" {
+		parts = append(parts, "-m", cmd.Resources.Memory)
+	}
+	if cmd.Resources.CPUs != "" {
+		parts = append(parts, "--cpus", cmd.Resources.CPUs)
+	}
+
+	// Add container name if specified
+	if cmd.ContainerName != "" {
+		parts = append(parts, "--name", cmd.ContainerName)
+	}
+
+	// Add flags for interactive/tty/detach
+	if cmd.Detach {
+		parts = append(parts, "-d")
+	}
+	if cmd.Interactive && cmd.TTY {
+		parts = append(parts, "-it")
+	} else if cmd.Interactive {
+		parts = append(parts, "-i")
+	} else if cmd.TTY {
+		parts = append(parts, "-t")
+	}
+
+	// Add image
+	if cmd.Image != "" {
+		parts = append(parts, cmd.Image)
+	}
+
+	// Add command if present
+	if len(cmd.Command) > 0 {
+		parts = append(parts, cmd.Command...)
+	}
+
+	return strings.Join(parts, " ")
 }
 
 // LogAuditEntry logs an audit entry for the request

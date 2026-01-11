@@ -233,8 +233,8 @@ func runAuditList(cmd *cobra.Command, args []string) error {
 
 	// Print header
 	fmt.Println()
-	fmt.Printf("%-20s %-12s %-8s %-35s %-8s %s\n", "TIMESTAMP", "USER", "DECISION", "URI", "SCORE", "IMAGE")
-	fmt.Println(strings.Repeat("-", 100))
+	fmt.Printf("%-20s %-12s %-8s %-6s %s\n", "TIMESTAMP", "USER", "DECISION", "SCORE", "COMMAND")
+	fmt.Println(strings.Repeat("-", 110))
 
 	for _, entry := range entries {
 		user := entry.User
@@ -245,14 +245,13 @@ func runAuditList(cmd *cobra.Command, args []string) error {
 			user = user[:11] + "…"
 		}
 
-		uri := entry.URI
-		if len(uri) > 35 {
-			uri = uri[:34] + "…"
+		// Use Command if available, otherwise show URI
+		command := entry.Command
+		if command == "" {
+			command = entry.Method + " " + entry.URI
 		}
-
-		image := entry.Image
-		if len(image) > 25 {
-			image = image[:24] + "…"
+		if len(command) > 60 {
+			command = command[:57] + "..."
 		}
 
 		decisionColor := "\033[32m" // green for allowed
@@ -262,14 +261,13 @@ func runAuditList(cmd *cobra.Command, args []string) error {
 			decisionColor = "\033[33m" // yellow for warned
 		}
 
-		fmt.Printf("%-20s %-12s %s%-8s\033[0m %-35s %-8d %s\n",
+		fmt.Printf("%-20s %-12s %s%-8s\033[0m %-6d %s\n",
 			entry.Timestamp.Format("2006-01-02 15:04:05"),
 			user,
 			decisionColor,
 			entry.Decision,
-			uri,
 			entry.RiskScore,
-			image,
+			command,
 		)
 	}
 
@@ -375,13 +373,18 @@ func printAuditEntry(entry *audit.Entry) {
 		user = "(unknown)"
 	}
 
-	fmt.Printf("%s%s\033[0m [%s] %s %s %s (score: %d, %dms)\n",
+	// Use Command if available, otherwise show Method + URI
+	command := entry.Command
+	if command == "" {
+		command = entry.Method + " " + entry.URI
+	}
+
+	fmt.Printf("%s%s\033[0m [%s] %s: %s (score: %d, %dms)\n",
 		decisionColor,
 		decisionIcon,
 		entry.Timestamp.Format("15:04:05"),
 		user,
-		entry.Method,
-		entry.URI,
+		command,
 		entry.RiskScore,
 		entry.DurationMs,
 	)
