@@ -1,2 +1,29 @@
-sentinel
+# Binaries (root level only)
+/sentinel
+/bin/
+*.exe
+dist/
+
+# Coverage
+coverage.out
+coverage.html
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Claude Code
 .claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.log
+*.tmp
+
+# Test artifacts
+tests/output/

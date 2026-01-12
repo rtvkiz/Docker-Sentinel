@@ -236,7 +236,7 @@ func init() {
 
 	// Scan command flags
 	scanCmd.Flags().StringSlice("scanner", []string{"trivy"}, "scanners to use (trivy, grype, scout)")
-	scanCmd.Flags().String("severity", "HIGH,CRITICAL", "minimum severity to report")
+	scanCmd.Flags().String("severity", "", "filter by severity (e.g., CRITICAL,HIGH,MEDIUM,LOW). Empty shows all")
 	scanCmd.Flags().Bool("fail-on", false, "exit with error if vulnerabilities found")
 	scanCmd.Flags().Int("max-critical", 0, "maximum allowed critical vulnerabilities")
 	scanCmd.Flags().Int("max-high", -1, "maximum allowed high vulnerabilities (-1 = unlimited)")
