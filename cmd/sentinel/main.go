@@ -10,10 +10,10 @@ import (
 )
 
 var (
-	version    = "0.1.0"
-	cfgFile    string
-	cfg        *config.Config
-	policyMgr  *policy.Manager
+	version   = "0.1.0"
+	cfgFile   string
+	cfg       *config.Config
+	policyMgr *policy.Manager
 )
 
 func main() {

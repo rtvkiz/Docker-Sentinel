@@ -33,6 +33,7 @@ Docker Sentinel intercepts and validates Docker commands before execution. It pr
 - **Secret Detection** - Find hardcoded secrets with TruffleHog
 - **Hot Reload** - Policy changes apply automatically without restart
 - **Risk Scoring** - Quantified risk assessment (0-100) for each command
+- **Audit Logging** - Complete audit trail of all Docker operations with user tracking
 
 ---
 
@@ -124,6 +125,9 @@ sudo sentinel install --method alias --shell bash
 │   ├── default.yaml
 │   ├── strict.yaml
 │   └── [custom].yaml
+├── audit/               # Audit logs
+│   ├── audit.db         # SQLite database (queryable)
+│   └── audit.jsonl      # JSON Lines (for tailing)
 └── cache/               # Scan result cache
 ```
 
@@ -183,6 +187,39 @@ sudo sentinel authz stop               # Stop daemon
 sudo sentinel authz reload             # Reload policy
 sudo sentinel authz install --systemd  # Install in Docker
 sudo sentinel authz uninstall          # Remove from Docker
+```
+
+### Audit Logs
+
+```bash
+sudo sentinel audit list               # List recent entries
+sudo sentinel audit list --limit 50    # Show more entries
+sudo sentinel audit list --user john   # Filter by user
+sudo sentinel audit list --decision denied  # Filter by decision
+
+sudo sentinel audit tail               # Live stream of events
+sudo sentinel audit tail --lines 20    # Show last 20 then stream
+
+sudo sentinel audit stats              # Summary statistics
+sudo sentinel audit stats --since 7d   # Stats for last 7 days
+
+sudo sentinel audit export --format csv --output /tmp/audit.csv
+sudo sentinel audit export --format json --since 24h
+
+sudo sentinel audit clear --keep-days 30  # Remove entries older than 30 days
+```
+
+### Shell Completion
+
+```bash
+# Bash
+sudo sentinel completion bash > /etc/bash_completion.d/sentinel
+
+# Zsh
+sudo sentinel completion zsh > "${fpath[1]}/_sentinel"
+
+# Fish
+sudo sentinel completion fish > ~/.config/fish/completions/sentinel.fish
 ```
 
 ---
