@@ -28,9 +28,7 @@ var rootCmd = &cobra.Command{
 	Use:   "sentinel",
 	Short: "Docker Sentinel - Pre-runtime container security",
 	Long: `Docker Sentinel intercepts and validates Docker commands before execution.
-
-It checks for dangerous flags, scans images for vulnerabilities, and enforces
-security policies to prevent container escapes and privilege escalation.`,
+			It checks for dangerous flags, scans images for vulnerabilities, and enforces security policies to prevent container escapes and privilege escalation.`,
 	Version: version,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		// Allow --help and --version for all users

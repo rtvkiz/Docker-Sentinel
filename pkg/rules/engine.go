@@ -39,6 +39,14 @@ func NewEngine(cfg *config.Config) *Engine {
 	policyMgr := policy.NewManager(cfg.PoliciesDir)
 	policyMgr.Init()
 
+	// Set the active policy from config
+	if cfg.ActivePolicy != "" {
+		if err := policyMgr.SetActive(cfg.ActivePolicy); err != nil {
+			// Fall back to default if the configured policy doesn't exist
+			policyMgr.SetActive("default")
+		}
+	}
+
 	return &Engine{
 		cfg:       cfg,
 		policyMgr: policyMgr,
