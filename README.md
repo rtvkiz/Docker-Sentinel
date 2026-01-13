@@ -1,5 +1,10 @@
 # Docker Sentinel
 
+![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?logo=go&logoColor=white)
+![License](https://img.shields.io/badge/License-MIT-green.svg)
+![Platform](https://img.shields.io/badge/Platform-Linux-FCC624?logo=linux&logoColor=black)
+![Docker](https://img.shields.io/badge/Docker-20.10+-2496ED?logo=docker&logoColor=white)
+
 **Pre-runtime Container Security for Docker**
 
 Docker Sentinel intercepts and validates Docker commands before execution. It provides policy-based enforcement, vulnerability scanning, secret detection, and a Docker authorization plugin for daemon-level security.
