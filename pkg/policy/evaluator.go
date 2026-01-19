@@ -75,34 +75,46 @@ func (e *Evaluator) Evaluate(cmd *interceptor.DockerCommand) (*EvaluationResult,
 		Score:   0,
 	}
 
-	// Evaluate privileged mode
-	e.evaluatePrivileged(cmd, result)
+	// Apply different rules based on command type
+	switch cmd.Action {
+	case "run", "create":
+		// Full runtime container security checks
+		e.evaluatePrivileged(cmd, result)
+		e.evaluateHostNamespaces(cmd, result)
+		e.evaluateCapabilities(cmd, result)
+		e.evaluateMounts(cmd, result)
+		e.evaluateSecurityOptions(cmd, result)
+		e.evaluateContainer(cmd, result)
+		e.evaluateImages(cmd, result)
+		e.evaluateEnvironment(cmd, result)
+		e.evaluateCustomRules(cmd, result)
 
-	// Evaluate host namespaces
-	e.evaluateHostNamespaces(cmd, result)
+	case "exec":
+		// Container exec - check capabilities and security options
+		e.evaluatePrivileged(cmd, result)
+		e.evaluateCapabilities(cmd, result)
+		e.evaluateEnvironment(cmd, result)
 
-	// Evaluate capabilities
-	e.evaluateCapabilities(cmd, result)
+	case "build":
+		// Build command - only check image-related rules (base image)
+		// and environment (build args might contain secrets)
+		e.evaluateImages(cmd, result)
+		e.evaluateEnvironment(cmd, result)
 
-	// Evaluate mounts
-	e.evaluateMounts(cmd, result)
+	case "push", "pull":
+		// Registry operations - only check image/registry rules
+		e.evaluateImages(cmd, result)
 
-	// Evaluate security options
-	e.evaluateSecurityOptions(cmd, result)
+	case "login", "logout":
+		// Registry authentication - minimal checks
+		// Allow by default
 
-	// Evaluate container config
-	e.evaluateContainer(cmd, result)
+	default:
+		// For other commands (ps, logs, inspect, etc.) - allow by default
+		// These are informational commands that don't pose security risks
+	}
 
-	// Evaluate images
-	e.evaluateImages(cmd, result)
-
-	// Evaluate environment
-	e.evaluateEnvironment(cmd, result)
-
-	// Evaluate custom rules
-	e.evaluateCustomRules(cmd, result)
-
-	// Evaluate OPA policies
+	// Evaluate OPA policies (applies to all commands if configured)
 	if e.opaEngine != nil {
 		if err := e.evaluateOPA(cmd, result); err != nil {
 			return nil, err
@@ -430,9 +442,13 @@ func (e *Evaluator) evaluateImages(cmd *interceptor.DockerCommand, result *Evalu
 
 	images := e.policy.Rules.Images
 
-	// Check registry
+	// For build/push commands, we're creating/pushing an image, not pulling
+	// Skip checks that only apply to image consumption (run, pull, create)
+	isBuildOrPush := cmd.Action == "build" || cmd.Action == "push"
+
+	// Check registry (applies to push - where are we pushing to)
 	registry := cmd.GetImageRegistry()
-	if len(images.AllowedRegistries) > 0 {
+	if len(images.AllowedRegistries) > 0 && !isBuildOrPush {
 		allowed := false
 		for _, r := range images.AllowedRegistries {
 			if registry == r || strings.HasPrefix(registry, r) {
@@ -452,7 +468,7 @@ func (e *Evaluator) evaluateImages(cmd *interceptor.DockerCommand, result *Evalu
 		}
 	}
 
-	// Check blocked registries
+	// Check blocked registries (applies to all - don't push/pull to blocked registries)
 	for _, blocked := range images.BlockedRegistries {
 		if registry == blocked {
 			result.Violations = append(result.Violations, Violation{
@@ -466,8 +482,9 @@ func (e *Evaluator) evaluateImages(cmd *interceptor.DockerCommand, result *Evalu
 		}
 	}
 
-	// Check :latest tag
-	if images.BlockLatestTag {
+	// Check :latest tag - only warn for run/pull/create (consuming images)
+	// For build, user is creating a tag, not consuming
+	if images.BlockLatestTag && !isBuildOrPush {
 		if strings.HasSuffix(cmd.Image, ":latest") || (!strings.Contains(cmd.Image, ":") && !strings.Contains(cmd.Image, "@")) {
 			result.Warnings = append(result.Warnings, Violation{
 				Rule:     "latest_tag",
@@ -478,8 +495,9 @@ func (e *Evaluator) evaluateImages(cmd *interceptor.DockerCommand, result *Evalu
 		}
 	}
 
-	// Check digest requirement
-	if images.RequireDigest && !strings.Contains(cmd.Image, "@sha256:") {
+	// Check digest requirement - only for run/pull/create (consuming images)
+	// Build/push creates images, digest doesn't apply
+	if images.RequireDigest && !isBuildOrPush && !strings.Contains(cmd.Image, "@sha256:") {
 		result.Violations = append(result.Violations, Violation{
 			Rule:        "digest_required",
 			Severity:    "medium",

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/rtvkiz/docker-sentinel/pkg/scanner"
 	"github.com/spf13/cobra"
 )
 
@@ -339,12 +340,22 @@ func checkActivePolicy() CheckResult {
 }
 
 func checkTrivy() CheckResult {
-	path, err := exec.LookPath("trivy")
-	if err != nil {
+	// Use the same logic as the actual scanner
+	trivy := scanner.NewTrivyScanner(cfg)
+	if !trivy.Available() {
 		return CheckResult{
 			Status:     "warning",
 			Message:    "Trivy is not installed",
 			Suggestion: "Install with: brew install trivy (or see https://trivy.dev)",
+		}
+	}
+
+	// Try to get version - check PATH first, then common locations
+	path := findScannerPath("trivy")
+	if path == "" {
+		return CheckResult{
+			Status:  "ok",
+			Message: "Trivy is installed",
 		}
 	}
 
@@ -365,13 +376,45 @@ func checkTrivy() CheckResult {
 	}
 }
 
+// findScannerPath finds a scanner executable in PATH or common locations
+func findScannerPath(name string) string {
+	// Try PATH first
+	if path, err := exec.LookPath(name); err == nil {
+		return path
+	}
+
+	// Check common installation paths
+	commonPaths := []string{
+		"/usr/local/bin/" + name,
+		"/usr/bin/" + name,
+		"/home/linuxbrew/.linuxbrew/bin/" + name,
+		"/opt/homebrew/bin/" + name,
+		"/snap/bin/" + name,
+	}
+	for _, p := range commonPaths {
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			return p
+		}
+	}
+	return ""
+}
+
 func checkGrype() CheckResult {
-	path, err := exec.LookPath("grype")
-	if err != nil {
+	grype := scanner.NewGrypeScanner(cfg)
+	if !grype.Available() {
 		return CheckResult{
 			Status:     "warning",
 			Message:    "Grype is not installed",
 			Suggestion: "Install with: brew install grype (or see https://github.com/anchore/grype)",
+		}
+	}
+
+	// Try to get version
+	path := findScannerPath("grype")
+	if path == "" {
+		return CheckResult{
+			Status:  "ok",
+			Message: "Grype is installed",
 		}
 	}
 
@@ -402,12 +445,22 @@ func checkGrype() CheckResult {
 }
 
 func checkTruffleHog() CheckResult {
-	path, err := exec.LookPath("trufflehog")
-	if err != nil {
+	// Use the same logic as the actual scanner
+	trufflehog := scanner.NewTruffleHogScanner(cfg)
+	if !trufflehog.Available() {
 		return CheckResult{
 			Status:     "warning",
 			Message:    "TruffleHog is not installed",
 			Suggestion: "Install with: brew install trufflehog",
+		}
+	}
+
+	// Try to get version
+	path := findScannerPath("trufflehog")
+	if path == "" {
+		return CheckResult{
+			Status:  "ok",
+			Message: "TruffleHog is installed",
 		}
 	}
 

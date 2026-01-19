@@ -13,8 +13,11 @@ import (
 
 // WatcherConfig holds configuration for the policy watcher
 type WatcherConfig struct {
-	// PoliciesDir is the directory to watch
+	// PoliciesDir is the directory to watch for policy file changes
 	PoliciesDir string
+
+	// ConfigDir is the directory containing config.yaml (for active_policy changes)
+	ConfigDir string
 
 	// DebounceDuration is the time to wait after last event before triggering reload
 	DebounceDuration time.Duration
@@ -85,7 +88,7 @@ func (pw *PolicyWatcher) Start() error {
 	pw.running = true
 	pw.mu.Unlock()
 
-	// Ensure directory exists
+	// Ensure policies directory exists
 	if _, err := os.Stat(pw.config.PoliciesDir); os.IsNotExist(err) {
 		pw.logFn("warn", "Policies directory does not exist: %s (creating)", pw.config.PoliciesDir)
 		if err := os.MkdirAll(pw.config.PoliciesDir, 0755); err != nil {
@@ -93,9 +96,20 @@ func (pw *PolicyWatcher) Start() error {
 		}
 	}
 
-	// Add directory to watcher
+	// Add policies directory to watcher
 	if err := pw.watcher.Add(pw.config.PoliciesDir); err != nil {
 		return fmt.Errorf("failed to watch directory %s: %w", pw.config.PoliciesDir, err)
+	}
+
+	// Also watch config directory for active_policy changes (config.yaml)
+	if pw.config.ConfigDir != "" && pw.config.ConfigDir != pw.config.PoliciesDir {
+		if _, err := os.Stat(pw.config.ConfigDir); err == nil {
+			if err := pw.watcher.Add(pw.config.ConfigDir); err != nil {
+				pw.logFn("warn", "Failed to watch config directory %s: %v", pw.config.ConfigDir, err)
+			} else {
+				pw.logFn("info", "Also watching config directory: %s", pw.config.ConfigDir)
+			}
+		}
 	}
 
 	// Start event handling goroutine
@@ -213,6 +227,11 @@ func (pw *PolicyWatcher) scheduleReload(eventPath string) {
 // isRelevantFile checks if the file matches watched patterns
 func (pw *PolicyWatcher) isRelevantFile(path string) bool {
 	filename := filepath.Base(path)
+
+	// Always watch config.yaml for active_policy changes
+	if filename == "config.yaml" || filename == "config.yml" {
+		return true
+	}
 
 	for _, pattern := range pw.config.FilePatterns {
 		matched, err := filepath.Match(pattern, filename)

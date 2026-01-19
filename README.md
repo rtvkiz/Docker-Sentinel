@@ -31,7 +31,7 @@ Docker Sentinel intercepts and validates Docker commands before execution. It pr
 - **Pre-Runtime Validation** - Block dangerous commands before they execute
 - **Docker Authorization Plugin** - Daemon-level enforcement that cannot be bypassed
 - **Vulnerability Scanning** - Integrated CVE scanning with Trivy, Grype, and Docker Scout
-- **Secret Detection** - Find hardcoded secrets with TruffleHog
+- **Secret Detection** - Automatic secret scanning on `docker push` and `docker build` with TruffleHog
 - **Hot Reload** - Policy changes apply automatically without restart
 - **Risk Scoring** - Quantified risk assessment (0-100) for each command
 - **Audit Logging** - Complete audit trail of all Docker operations
@@ -332,6 +332,84 @@ rules:
 | High | 25 |
 | Medium | 15 |
 | Low | 5 |
+
+### Policy Modes Explained
+
+The **policy mode** determines how violations are handled:
+
+| Mode | Behavior | Use Case |
+|------|----------|----------|
+| `enforce` | **Blocks** commands that violate rules | Production environments |
+| `warn` | **Allows** all commands, logs violations as warnings | Development, testing new policies |
+| `audit` | **Allows** all commands, only logs for analysis | Initial rollout, monitoring |
+
+**Important:** Policy mode is separate from rule actions.
+
+```yaml
+mode: warn          # Policy mode - determines enforcement behavior
+
+rules:
+  privileged:
+    action: block   # Rule action - categorizes the violation severity
+```
+
+In **warn mode**, even rules with `action: block` will only generate warnings - they won't actually block the command. This allows you to test strict policies without impacting workflows.
+
+### Command-Specific Rules
+
+Different Docker commands receive different security checks:
+
+| Command | Security Checks Applied |
+|---------|------------------------|
+| `run`, `create` | All checks: privileged, namespaces, capabilities, mounts, security options, user, resources, images |
+| `build` | Image rules only (registry restrictions), environment (build args) |
+| `push` | Image rules, **secret scanning** (blocks if secrets found) |
+| `pull` | Image rules (registry restrictions) |
+| `exec` | Privileged mode, capabilities, environment |
+| Others (`ps`, `logs`, etc.) | No security checks (informational commands) |
+
+---
+
+## Secret Detection
+
+Docker Sentinel automatically scans images for hardcoded secrets using TruffleHog.
+
+### When Secret Scanning Occurs
+
+| Operation | Trigger | Behavior |
+|-----------|---------|----------|
+| `docker push` | **Before push** | ❌ **Blocks** if critical/high/verified secrets found |
+| `docker build -t image .` | **After build** | ⚠️ **Warns** (image already built) |
+| `sentinel scan-secrets image` | On-demand | Reports all findings |
+
+### Requirements
+
+- TruffleHog must be installed: `brew install trufflehog`
+- If TruffleHog is not installed, secret scanning is silently skipped
+
+### What Gets Blocked
+
+| Finding | Push Blocked? |
+|---------|---------------|
+| Verified (active) secrets | ✅ Always blocked |
+| Critical severity | ✅ Blocked |
+| High severity | ✅ Blocked |
+| Medium severity | ⚠️ Warning only |
+
+### Example
+
+```bash
+# Push blocked due to secrets
+docker push myapp:latest
+#  🔐 SECRETS DETECTED - PUSH BLOCKED
+#  ─────────────────────────────────────────
+#  🚫 Found 2 VERIFIED (active) secret(s) in image!
+#  
+#  💡 Remove secrets and rebuild the image before pushing.
+
+# Manual scan for details
+sentinel scan-secrets myapp:latest
+```
 
 ---
 

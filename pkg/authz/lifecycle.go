@@ -42,6 +42,12 @@ func NewDaemon(config *PluginConfig) (*Daemon, error) {
 	// Create policy watcher if hot reload is enabled
 	if config.HotReload && config.PoliciesDir != "" {
 		watcherCfg := DefaultWatcherConfig(config.PoliciesDir, config.HotReloadDebounce)
+		// Also watch the config directory for active_policy changes
+		configDir := "/etc/sentinel"
+		if envDir := os.Getenv("SENTINEL_CONFIG_DIR"); envDir != "" {
+			configDir = envDir
+		}
+		watcherCfg.ConfigDir = configDir
 		watcher, err := NewPolicyWatcher(watcherCfg, d.Reload, plugin.log)
 		if err != nil {
 			plugin.log("warn", "Failed to create policy watcher: %v (hot reload disabled)", err)

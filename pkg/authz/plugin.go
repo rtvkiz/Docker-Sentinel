@@ -2,6 +2,7 @@ package authz
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/rtvkiz/docker-sentinel/pkg/config"
 	"github.com/rtvkiz/docker-sentinel/pkg/interceptor"
 	"github.com/rtvkiz/docker-sentinel/pkg/policy"
+	"github.com/rtvkiz/docker-sentinel/pkg/scanner"
 )
 
 // getDefaultPoliciesDir returns the policies directory based on priority:
@@ -47,24 +49,25 @@ type Plugin struct {
 	evaluator        *policy.Evaluator
 	converter        *Converter
 	auditLogger      *audit.Logger
+	secretScanner    *scanner.TruffleHogScanner
 	activePolicyName string
 	startTime        time.Time
 	mu               sync.RWMutex
 }
 
 // NewPlugin creates a new authorization plugin
-func NewPlugin(config *PluginConfig) (*Plugin, error) {
+func NewPlugin(pluginCfg *PluginConfig) (*Plugin, error) {
 	p := &Plugin{
-		config:    config,
+		config:    pluginCfg,
 		converter: NewConverter(),
 		startTime: time.Now(),
 	}
 
 	// Initialize policy manager with proper path resolution
-	if config.PoliciesDir == "" {
-		config.PoliciesDir = getDefaultPoliciesDir()
+	if pluginCfg.PoliciesDir == "" {
+		pluginCfg.PoliciesDir = getDefaultPoliciesDir()
 	}
-	p.policyMgr = policy.NewManager(config.PoliciesDir)
+	p.policyMgr = policy.NewManager(pluginCfg.PoliciesDir)
 
 	// Initialize policies directory
 	if err := p.policyMgr.Init(); err != nil {
@@ -76,9 +79,22 @@ func NewPlugin(config *PluginConfig) (*Plugin, error) {
 		return nil, fmt.Errorf("failed to load policy: %w", err)
 	}
 
+	// Initialize secret scanner (for push/build operations)
+	cfg, err := config.Load("")
+	if err != nil {
+		p.log("warn", "Failed to load config for secret scanner: %v", err)
+	} else {
+		p.secretScanner = scanner.NewTruffleHogScanner(cfg)
+		if p.secretScanner.Available() {
+			p.log("info", "Secret scanning enabled (TruffleHog available)")
+		} else {
+			p.log("info", "Secret scanning disabled (TruffleHog not installed)")
+		}
+	}
+
 	// Initialize audit logger
-	if config.AuditEnabled {
-		auditDir := config.AuditDir
+	if pluginCfg.AuditEnabled {
+		auditDir := pluginCfg.AuditDir
 		if auditDir == "" {
 			auditDir = "/etc/sentinel/audit"
 		}
@@ -108,14 +124,20 @@ func (p *Plugin) loadPolicy() error {
 	// Try to load specified policy, or use active/default
 	if p.config.PolicyName != "" {
 		// Explicit policy name was provided at startup, use it
+		p.log("info", "Using explicit policy from startup flag: %s", p.config.PolicyName)
 		pol, err = p.policyMgr.Load(p.config.PolicyName)
 	} else {
 		// No explicit policy - reload active_policy from config file
 		// This is critical for hot reload when user runs "sentinel policy use <name>"
 		cfg, cfgErr := config.Load("")
-		if cfgErr == nil && cfg.ActivePolicy != "" {
-			if setErr := p.policyMgr.SetActive(cfg.ActivePolicy); setErr != nil {
-				p.log("warn", "Failed to set active policy from config: %v", setErr)
+		if cfgErr != nil {
+			p.log("warn", "Failed to load config during reload: %v", cfgErr)
+		} else {
+			p.log("info", "Config reloaded, active_policy from file: %s", cfg.ActivePolicy)
+			if cfg.ActivePolicy != "" {
+				if setErr := p.policyMgr.SetActive(cfg.ActivePolicy); setErr != nil {
+					p.log("warn", "Failed to set active policy from config: %v", setErr)
+				}
 			}
 		}
 		pol, err = p.policyMgr.GetActive()
@@ -194,9 +216,55 @@ func (p *Plugin) AuthZReq(req *AuthZRequest) *AuthZResponse {
 
 // AuthZRes handles post-request authorization
 func (p *Plugin) AuthZRes(req *AuthZRequest) *AuthZResponse {
-	// Post-request authorization - we typically allow all
-	// This could be extended to filter response data
+	// Check if this is a build response - scan the built image for secrets
+	if p.isBuildResponse(req) {
+		imageTag := p.extractBuildTag(req)
+		if imageTag != "" {
+			if secretResult := p.scanImageForSecrets(imageTag); secretResult != nil {
+				if !secretResult.Allowed {
+					// Secrets found in built image - log warning
+					// Note: We can't truly "block" here since the build already completed
+					// But we log it prominently so it shows in the daemon output
+					p.log("warn", "SECRETS DETECTED in built image %s: %s", imageTag, secretResult.Message)
+					// Return a warning message (Docker will display this)
+					return &AuthZResponse{
+						Allow: true, // Can't block after build, but warn
+						Msg:   fmt.Sprintf("⚠️ WARNING: Secrets detected in built image %s. Do not push this image!", imageTag),
+					}
+				}
+			}
+		}
+	}
+
+	// Post-request authorization - allow all
 	return &AuthZResponse{Allow: true}
+}
+
+// isBuildResponse checks if this is a response to a build request
+func (p *Plugin) isBuildResponse(req *AuthZRequest) bool {
+	return strings.Contains(req.RequestURI, "/build")
+}
+
+// extractBuildTag extracts the image tag from a build request
+func (p *Plugin) extractBuildTag(req *AuthZRequest) string {
+	// Parse the request URI properly to get the 't' (tag) parameter
+	// Example: /v1.47/build?t=myapp:latest&cpuperiod=0&...
+	parsedURL, err := url.Parse(req.RequestURI)
+	if err != nil {
+		return ""
+	}
+
+	// Get the 't' query parameter (image tag)
+	tag := parsedURL.Query().Get("t")
+	if tag == "" {
+		return ""
+	}
+
+	// URL decode if needed
+	if decoded, err := url.QueryUnescape(tag); err == nil {
+		return decoded
+	}
+	return tag
 }
 
 // handleConversionError handles errors during request conversion
@@ -412,6 +480,25 @@ func (p *Plugin) AuthZReqWithAudit(req *AuthZRequest) *AuthZReqResult {
 		result.Violations = append(result.Violations, w.Message)
 	}
 
+	// Secret scanning for push operations (scan before allowing push)
+	if cmd.Action == "push" && cmd.Image != "" && evalResult.Allowed {
+		if secretResult := p.scanImageForSecrets(cmd.Image); secretResult != nil {
+			if !secretResult.Allowed {
+				// Secrets found - block the push
+				result.Response = &AuthZResponse{
+					Allow: false,
+					Msg:   secretResult.Message,
+				}
+				result.Violations = append(result.Violations, secretResult.Message)
+				result.RiskScore += secretResult.ScoreImpact
+				return result
+			} else if secretResult.Message != "" {
+				// Warnings only
+				result.Violations = append(result.Violations, secretResult.Message)
+			}
+		}
+	}
+
 	// Determine response
 	if evalResult.Allowed {
 		// Check for warnings
@@ -432,6 +519,73 @@ func (p *Plugin) AuthZReqWithAudit(req *AuthZRequest) *AuthZReqResult {
 	}
 
 	return result
+}
+
+// SecretScanResult contains the result of a secret scan
+type SecretScanResult struct {
+	Allowed     bool
+	Message     string
+	ScoreImpact int
+}
+
+// scanImageForSecrets scans an image for secrets using TruffleHog
+func (p *Plugin) scanImageForSecrets(image string) *SecretScanResult {
+	if p.secretScanner == nil || !p.secretScanner.Available() {
+		return nil // Scanner not available, skip
+	}
+
+	p.log("info", "Scanning image for secrets: %s", image)
+
+	result, err := p.secretScanner.ScanSecrets(image)
+	if err != nil {
+		p.log("warn", "Secret scan failed for %s: %v", image, err)
+		return nil // Don't block on scan failure
+	}
+
+	if result.SecretsFound == 0 {
+		p.log("info", "No secrets found in image: %s", image)
+		return &SecretScanResult{Allowed: true}
+	}
+
+	// Count by severity
+	var critical, high, verified int
+	for _, s := range result.Secrets {
+		if s.Verified {
+			verified++
+		}
+		switch s.Severity {
+		case "CRITICAL":
+			critical++
+		case "HIGH":
+			high++
+		}
+	}
+
+	// Verified secrets always block
+	if verified > 0 {
+		msg := fmt.Sprintf("\n\n  🔐 SECRETS DETECTED - PUSH BLOCKED\n  ─────────────────────────────────────────\n  🚫 Found %d VERIFIED (active) secret(s) in image!\n  These are confirmed valid credentials.\n\n  💡 Remove secrets and rebuild the image before pushing.\n", verified)
+		return &SecretScanResult{
+			Allowed:     false,
+			Message:     msg,
+			ScoreImpact: 50,
+		}
+	}
+
+	// Critical/high secrets block
+	if critical > 0 || high > 0 {
+		msg := fmt.Sprintf("\n\n  🔐 SECRETS DETECTED - PUSH BLOCKED\n  ─────────────────────────────────────────\n  ❌ Found %d critical and %d high-severity secret(s)\n\n  💡 Review findings and remove secrets before pushing.\n     Use 'sentinel scan-secrets %s' for details.\n", critical, high, image)
+		return &SecretScanResult{
+			Allowed:     false,
+			Message:     msg,
+			ScoreImpact: 40,
+		}
+	}
+
+	// Medium severity - warn only
+	return &SecretScanResult{
+		Allowed: true,
+		Message: fmt.Sprintf("Found %d medium-severity potential secret(s) in image", result.SecretsFound),
+	}
 }
 
 // formatCommandSummary creates a readable Docker command from the parsed command

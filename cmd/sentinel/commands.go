@@ -1173,6 +1173,11 @@ func executeDocker(args []string) error {
 		})
 	}
 
+	// Strip leading "docker" if present (user may have typed "sentinel exec -- docker build ...")
+	if len(args) > 0 && args[0] == "docker" {
+		args = args[1:]
+	}
+
 	cmd := exec.Command(dockerPath, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
