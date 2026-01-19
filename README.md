@@ -1,6 +1,6 @@
 # Docker Sentinel
 
-![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?logo=go&logoColor=white)
+![Go Version](https://img.shields.io/badge/Go-1.24+-00ADD8?logo=go&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
 ![Platform](https://img.shields.io/badge/Platform-Linux-FCC624?logo=linux&logoColor=black)
 ![Docker](https://img.shields.io/badge/Docker-20.10+-2496ED?logo=docker&logoColor=white)
@@ -42,15 +42,15 @@ Docker Sentinel intercepts and validates Docker commands before execution. It pr
 
 ## Quick Start
 
-### Install
+### Install (Linux)
 
 ```bash
-# Quick install script
+# Full installation (downloads binary, configures Docker, starts services)
+# WARNING: This will restart Docker, stopping any running containers
 curl -sSL https://raw.githubusercontent.com/rtvkiz/docker-sentinel/main/scripts/install.sh | sudo bash
-
-# Initialize configuration
-sudo sentinel init
 ```
+
+> **Note:** The install script automatically configures everything including the authorization plugin. You do NOT need to run `sentinel init` after using the install script.
 
 ### Verify Installation
 
@@ -85,17 +85,27 @@ docker run --privileged ubuntu
 
 - Docker 20.10+
 - Root/sudo access
-- Go 1.21+ (only for building from source)
+- Linux (authorization plugin requires systemd)
+- Go 1.24+ (only for building from source)
 
 ### Installation Methods
 
-#### 1. Install Script (Recommended)
+#### 1. Install Script (Recommended for Linux)
+
+The install script performs a complete installation:
+- Downloads and installs the binary
+- Creates configuration and default policies
+- Installs systemd service
+- Configures Docker authorization plugin
+- **Restarts Docker** (stops running containers)
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/rtvkiz/docker-sentinel/main/scripts/install.sh | sudo bash
 ```
 
-#### 2. Download Binary
+#### 2. Download Binary (Manual Setup)
+
+Use this method for more control over the installation process:
 
 ```bash
 # Download latest release
@@ -103,8 +113,11 @@ curl -sSL https://github.com/rtvkiz/docker-sentinel/releases/latest/download/sen
   -o /usr/local/bin/sentinel
 chmod +x /usr/local/bin/sentinel
 
-# Initialize
+# Run interactive setup wizard
 sudo sentinel init
+
+# Optionally install authorization plugin
+sudo sentinel authz install --systemd --restart-docker
 ```
 
 #### 3. Build from Source
@@ -114,19 +127,23 @@ git clone https://github.com/rtvkiz/docker-sentinel.git
 cd docker-sentinel
 make build
 sudo make install
+
+# Run interactive setup wizard
 sudo sentinel init
 ```
 
 ### Post-Installation Setup
 
+> **Note:** Skip this section if you used the install script (Method 1) - it already configures everything.
+
 ```bash
-# Interactive setup wizard
+# Interactive setup wizard (creates config and policies)
 sudo sentinel init
 
 # Or non-interactive with strict policy
 sudo sentinel init --policy strict --no-interactive
 
-# Install as Docker authorization plugin (recommended)
+# Install as Docker authorization plugin (Linux only)
 sudo sentinel authz install --systemd --restart-docker
 
 # Verify everything is working
