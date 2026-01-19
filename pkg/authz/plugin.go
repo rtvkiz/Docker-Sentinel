@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/rtvkiz/docker-sentinel/pkg/audit"
+	"github.com/rtvkiz/docker-sentinel/pkg/config"
 	"github.com/rtvkiz/docker-sentinel/pkg/interceptor"
 	"github.com/rtvkiz/docker-sentinel/pkg/policy"
 )
@@ -106,8 +107,17 @@ func (p *Plugin) loadPolicy() error {
 
 	// Try to load specified policy, or use active/default
 	if p.config.PolicyName != "" {
+		// Explicit policy name was provided at startup, use it
 		pol, err = p.policyMgr.Load(p.config.PolicyName)
 	} else {
+		// No explicit policy - reload active_policy from config file
+		// This is critical for hot reload when user runs "sentinel policy use <name>"
+		cfg, cfgErr := config.Load("")
+		if cfgErr == nil && cfg.ActivePolicy != "" {
+			if setErr := p.policyMgr.SetActive(cfg.ActivePolicy); setErr != nil {
+				p.log("warn", "Failed to set active policy from config: %v", setErr)
+			}
+		}
 		pol, err = p.policyMgr.GetActive()
 	}
 
