@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"runtime"
 
 	"github.com/rtvkiz/docker-sentinel/pkg/config"
 	"github.com/rtvkiz/docker-sentinel/pkg/policy"
@@ -10,7 +11,11 @@ import (
 )
 
 var (
+	// Version information - set via ldflags at build time
 	version   = "0.1.0"
+	gitCommit = "unknown"
+	buildDate = "unknown"
+
 	cfgFile   string
 	cfg       *config.Config
 	policyMgr *policy.Manager
@@ -31,8 +36,8 @@ var rootCmd = &cobra.Command{
 			It checks for dangerous flags, scans images for vulnerabilities, and enforces security policies to prevent container escapes and privilege escalation.`,
 	Version: version,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		// Allow --help and --version for all users
-		if cmd.Name() == "help" || cmd.Name() == "sentinel" {
+		// Allow --help, --version, and version command for all users
+		if cmd.Name() == "help" || cmd.Name() == "sentinel" || cmd.Name() == "version" {
 			return nil
 		}
 		// Require root for all other commands
@@ -40,6 +45,34 @@ var rootCmd = &cobra.Command{
 			return fmt.Errorf("sentinel requires root privileges\n\nRun with: sudo sentinel %s", cmd.Name())
 		}
 		return nil
+	},
+}
+
+var versionCmd = &cobra.Command{
+	Use:   "version",
+	Short: "Print version and build information",
+	Long:  `Print detailed version information including build date and git commit.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		jsonFlag, _ := cmd.Flags().GetBool("json")
+
+		if jsonFlag {
+			output := VersionOutput{
+				Version:   version,
+				GitCommit: gitCommit,
+				BuildDate: buildDate,
+				GoVersion: runtime.Version(),
+				Platform:  runtime.GOOS + "/" + runtime.GOARCH,
+			}
+			outputJSON(output, true)
+			return
+		}
+
+		fmt.Printf("Docker Sentinel %s\n", version)
+		fmt.Println()
+		fmt.Printf("  Git Commit:  %s\n", gitCommit)
+		fmt.Printf("  Build Date:  %s\n", buildDate)
+		fmt.Printf("  Go Version:  %s\n", runtime.Version())
+		fmt.Printf("  Platform:    %s/%s\n", runtime.GOOS, runtime.GOARCH)
 	},
 }
 
@@ -258,7 +291,7 @@ func init() {
 
 	// Build command tree
 	policyCmd.AddCommand(policyShowCmd, policyLoadCmd, policyListCmd, policyEditCmd, policyCreateCmd, policyUseCmd, policyValidateCmd, policyDeleteCmd)
-	rootCmd.AddCommand(execCmd, validateCmd, scanCmd, scanSecretsCmd, installCmd, policyCmd, authzCmd, auditCmd)
+	rootCmd.AddCommand(execCmd, validateCmd, scanCmd, scanSecretsCmd, installCmd, policyCmd, authzCmd, auditCmd, versionCmd)
 }
 
 func initConfig() {

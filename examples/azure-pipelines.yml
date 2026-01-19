@@ -1,0 +1,128 @@
+# Example Azure Pipelines for container security with Docker Sentinel
+# Copy this file to azure-pipelines.yml in your project
+
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+
+pr:
+  branches:
+    include:
+      - main
+
+variables:
+  imageName: 'myapp'
+  dockerRegistryServiceConnection: 'your-acr-connection'
+  containerRegistry: 'yourregistry.azurecr.io'
+
+stages:
+  - stage: Build
+    displayName: 'Build'
+    jobs:
+      - job: Build
+        displayName: 'Build Image'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: Docker@2
+            displayName: 'Build image'
+            inputs:
+              command: 'build'
+              Dockerfile: '**/Dockerfile'
+              tags: '$(Build.BuildId)'
+              arguments: '-t $(imageName):$(Build.BuildId)'
+
+          - script: |
+              docker save $(imageName):$(Build.BuildId) -o $(Build.ArtifactStagingDirectory)/image.tar
+            displayName: 'Save image'
+
+          - publish: $(Build.ArtifactStagingDirectory)/image.tar
+            artifact: docker-image
+
+  - stage: Security
+    displayName: 'Security Scan'
+    dependsOn: Build
+    jobs:
+      - job: VulnerabilityScan
+        displayName: 'Vulnerability Scan'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - download: current
+            artifact: docker-image
+
+          - script: |
+              docker load -i $(Pipeline.Workspace)/docker-image/image.tar
+            displayName: 'Load image'
+
+          - script: |
+              docker run --rm \
+                -v /var/run/docker.sock:/var/run/docker.sock \
+                ghcr.io/rtvkiz/docker-sentinel:latest \
+                scan --json --fail-on --max-critical 0 $(imageName):$(Build.BuildId)
+            displayName: 'Run vulnerability scan'
+
+      - job: SecretScan
+        displayName: 'Secret Scan'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - download: current
+            artifact: docker-image
+
+          - script: |
+              docker load -i $(Pipeline.Workspace)/docker-image/image.tar
+            displayName: 'Load image'
+
+          - script: |
+              docker run --rm \
+                -v /var/run/docker.sock:/var/run/docker.sock \
+                ghcr.io/rtvkiz/docker-sentinel:latest \
+                scan-secrets --json --fail-on-secrets $(imageName):$(Build.BuildId)
+            displayName: 'Run secret scan'
+
+      - job: ConfigValidation
+        displayName: 'Config Validation'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - script: |
+              docker run --rm \
+                ghcr.io/rtvkiz/docker-sentinel:latest \
+                validate --json -- docker run \
+                --read-only \
+                --cap-drop ALL \
+                --security-opt no-new-privileges:true \
+                $(imageName):$(Build.BuildId)
+            displayName: 'Validate Docker config'
+
+  - stage: Deploy
+    displayName: 'Deploy'
+    dependsOn: Security
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - deployment: Deploy
+        displayName: 'Deploy to Registry'
+        pool:
+          vmImage: 'ubuntu-latest'
+        environment: 'production'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - download: current
+                  artifact: docker-image
+
+                - script: |
+                    docker load -i $(Pipeline.Workspace)/docker-image/image.tar
+                  displayName: 'Load image'
+
+                - task: Docker@2
+                  displayName: 'Push image'
+                  inputs:
+                    command: 'push'
+                    containerRegistry: $(dockerRegistryServiceConnection)
+                    repository: $(imageName)
+                    tags: '$(Build.BuildId)'

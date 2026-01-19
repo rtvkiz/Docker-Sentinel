@@ -4,6 +4,7 @@
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
 ![Platform](https://img.shields.io/badge/Platform-Linux-FCC624?logo=linux&logoColor=black)
 ![Docker](https://img.shields.io/badge/Docker-20.10+-2496ED?logo=docker&logoColor=white)
+[![CI](https://github.com/rtvkiz/docker-sentinel/actions/workflows/ci.yml/badge.svg)](https://github.com/rtvkiz/docker-sentinel/actions/workflows/ci.yml)
 
 **Pre-runtime Container Security for Docker**
 
@@ -14,14 +15,14 @@ Docker Sentinel intercepts and validates Docker commands before execution. It pr
 │   Docker CLI    │────>│  Docker Daemon  │────>│    Sentinel     │
 │  docker run ... │     │                 │     │  AuthZ Plugin   │
 └─────────────────┘     └─────────────────┘     └─────────────────┘
-                                │                       │
-                                │   Allow / Deny        │
-                                │<──────────────────────│
-                                v
-                        ┌─────────────┐
-                        │   Execute   │
-                        │  Container  │
-                        └─────────────┘
+                               │                       │
+                               │   Allow / Deny        │
+                               │<──────────────────────│
+                               v
+                       ┌─────────────┐
+                       │   Execute   │
+                       │  Container  │
+                       └─────────────┘
 ```
 
 ## Features
@@ -33,7 +34,9 @@ Docker Sentinel intercepts and validates Docker commands before execution. It pr
 - **Secret Detection** - Find hardcoded secrets with TruffleHog
 - **Hot Reload** - Policy changes apply automatically without restart
 - **Risk Scoring** - Quantified risk assessment (0-100) for each command
-- **Audit Logging** - Complete audit trail of all Docker operations with user tracking
+- **Audit Logging** - Complete audit trail of all Docker operations
+- **JSON Output** - Machine-readable output for CI/CD integration
+- **Interactive Setup** - Easy initialization wizard for new users
 
 ---
 
@@ -42,13 +45,21 @@ Docker Sentinel intercepts and validates Docker commands before execution. It pr
 ### Install
 
 ```bash
+# Quick install script
 curl -sSL https://raw.githubusercontent.com/rtvkiz/docker-sentinel/main/scripts/install.sh | sudo bash
+
+# Initialize configuration
+sudo sentinel init
 ```
 
-### Verify
+### Verify Installation
 
 ```bash
-sudo sentinel authz status
+# Run diagnostics
+sudo sentinel doctor
+
+# Check version
+sentinel version
 ```
 
 ### Test
@@ -66,12 +77,6 @@ docker run --privileged ubuntu
 #     → Use specific capabilities instead: --cap-add
 ```
 
-### Uninstall
-
-```bash
-curl -sSL https://raw.githubusercontent.com/rtvkiz/docker-sentinel/main/scripts/uninstall.sh | sudo bash
-```
-
 ---
 
 ## Installation
@@ -82,7 +87,53 @@ curl -sSL https://raw.githubusercontent.com/rtvkiz/docker-sentinel/main/scripts/
 - Root/sudo access
 - Go 1.21+ (only for building from source)
 
-### Optional Tools
+### Installation Methods
+
+#### 1. Install Script (Recommended)
+
+```bash
+curl -sSL https://raw.githubusercontent.com/rtvkiz/docker-sentinel/main/scripts/install.sh | sudo bash
+```
+
+#### 2. Download Binary
+
+```bash
+# Download latest release
+curl -sSL https://github.com/rtvkiz/docker-sentinel/releases/latest/download/sentinel-linux-amd64 \
+  -o /usr/local/bin/sentinel
+chmod +x /usr/local/bin/sentinel
+
+# Initialize
+sudo sentinel init
+```
+
+#### 3. Build from Source
+
+```bash
+git clone https://github.com/rtvkiz/docker-sentinel.git
+cd docker-sentinel
+make build
+sudo make install
+sudo sentinel init
+```
+
+### Post-Installation Setup
+
+```bash
+# Interactive setup wizard
+sudo sentinel init
+
+# Or non-interactive with strict policy
+sudo sentinel init --policy strict --no-interactive
+
+# Install as Docker authorization plugin (recommended)
+sudo sentinel authz install --systemd --restart-docker
+
+# Verify everything is working
+sudo sentinel doctor
+```
+
+### Optional Scanners
 
 | Tool | Purpose | Installation |
 |------|---------|--------------|
@@ -90,59 +141,31 @@ curl -sSL https://raw.githubusercontent.com/rtvkiz/docker-sentinel/main/scripts/
 | Grype | CVE scanning | `brew install grype` |
 | TruffleHog | Secret detection | `brew install trufflehog` |
 
-### Build from Source
-
-```bash
-git clone https://github.com/rtvkiz/docker-sentinel.git
-cd docker-sentinel
-go build -o sentinel ./cmd/sentinel
-sudo mv sentinel /usr/local/bin/
-sudo sentinel authz install --systemd --restart-docker
-```
-
-### Deployment Options
-
-**Authorization Plugin (Recommended)** - Daemon-level, cannot be bypassed:
-```bash
-sudo sentinel authz install --systemd --restart-docker
-```
-
-**Shell Integration** - For development/testing only:
-```bash
-sudo sentinel install --method alias --shell bash
-```
-
----
-
-## Configuration
-
-### Directory Structure
-
-```
-/etc/sentinel/
-├── config.yaml          # Main configuration
-├── policies/            # Policy files
-│   ├── default.yaml
-│   ├── strict.yaml
-│   └── [custom].yaml
-├── audit/               # Audit logs
-│   ├── audit.db         # SQLite database (queryable)
-│   └── audit.jsonl      # JSON Lines (for tailing)
-└── cache/               # Scan result cache
-```
-
-### Environment Variables
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `SENTINEL_CONFIG_DIR` | Config directory | `/etc/sentinel` |
-| `EDITOR` | Editor for `policy edit` | `vim` |
-
 ---
 
 ## CLI Commands
 
-> All commands require root privileges (`sudo`).
+> All commands require root privileges (`sudo`), except `version`.
+
+### Quick Reference
+
+See the full [Cheatsheet](docs/CHEATSHEET.md) for a complete command reference.
+
+### System Commands
+
+```bash
+# Show version and build info
+sentinel version
+sentinel version --json
+
+# Run diagnostics
+sudo sentinel doctor
+sudo sentinel doctor --json
+
+# Interactive setup wizard
+sudo sentinel init
+sudo sentinel init --policy strict --no-interactive
+```
 
 ### Validation
 
@@ -152,6 +175,9 @@ sudo sentinel exec -- docker run nginx:latest
 
 # Validate without executing
 sudo sentinel validate -- docker run --privileged ubuntu
+
+# JSON output for CI/CD
+sudo sentinel validate --json -- docker run --privileged ubuntu
 ```
 
 ### Scanning
@@ -159,11 +185,16 @@ sudo sentinel validate -- docker run --privileged ubuntu
 ```bash
 # Vulnerability scan
 sudo sentinel scan nginx:latest
-sudo sentinel scan --scanner trivy,grype --fail-on --max-critical 0 myapp:latest
+sudo sentinel scan --scanner trivy,grype nginx:latest
+sudo sentinel scan --fail-on --max-critical 0 myapp:latest
 
 # Secret scan
 sudo sentinel scan-secrets myapp:latest
 sudo sentinel scan-secrets --fail-on-secrets myapp:latest
+
+# JSON output for CI/CD
+sudo sentinel scan --json nginx:latest
+sudo sentinel scan-secrets --json myapp:latest
 ```
 
 ### Policy Management
@@ -185,7 +216,7 @@ sudo sentinel authz status             # Check status
 sudo sentinel authz start              # Start daemon
 sudo sentinel authz stop               # Stop daemon
 sudo sentinel authz reload             # Reload policy
-sudo sentinel authz install --systemd  # Install in Docker
+sudo sentinel authz install --systemd  # Install as systemd service
 sudo sentinel authz uninstall          # Remove from Docker
 ```
 
@@ -193,38 +224,51 @@ sudo sentinel authz uninstall          # Remove from Docker
 
 ```bash
 sudo sentinel audit list               # List recent entries
-sudo sentinel audit list --limit 50    # Show more entries
-sudo sentinel audit list --user john   # Filter by user
-sudo sentinel audit list --decision denied  # Filter by decision
-
-sudo sentinel audit tail               # Live stream of events
-sudo sentinel audit tail --lines 20    # Show last 20 then stream
-
-sudo sentinel audit stats              # Summary statistics
-sudo sentinel audit stats --since 7d   # Stats for last 7 days
-
-sudo sentinel audit export --format csv --output /tmp/audit.csv
-sudo sentinel audit export --format json --since 24h
-
-sudo sentinel audit clear --keep-days 30  # Remove entries older than 30 days
-```
-
-### Shell Completion
-
-```bash
-# Bash
-sudo sentinel completion bash > /etc/bash_completion.d/sentinel
-
-# Zsh
-sudo sentinel completion zsh > "${fpath[1]}/_sentinel"
-
-# Fish
-sudo sentinel completion fish > ~/.config/fish/completions/sentinel.fish
+sudo sentinel audit list --limit 50 --decision denied
+sudo sentinel audit tail               # Live stream
+sudo sentinel audit stats --since 7d   # Statistics
+sudo sentinel audit export --format csv --output audit.csv
 ```
 
 ---
 
+## Configuration
+
+### Directory Structure
+
+```
+/etc/sentinel/
+├── config.yaml          # Main configuration
+├── policies/            # Policy files
+│   ├── default.yaml
+│   ├── strict.yaml
+│   └── [custom].yaml
+├── audit/               # Audit logs
+│   ├── audit.db         # SQLite database
+│   └── audit.jsonl      # JSON Lines
+└── cache/               # Scan result cache
+```
+
+### Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `SENTINEL_CONFIG_DIR` | Config directory | `/etc/sentinel` |
+| `EDITOR` | Editor for `policy edit` | `vim` |
+
+---
+
 ## Policy System
+
+### Built-in Templates
+
+| Template | Mode | Risk Score | Use Case |
+|----------|------|------------|----------|
+| `default` | warn | 50 | Balanced security |
+| `strict` | enforce | 25 | Maximum security |
+| `permissive` | audit | 100 | Logging only |
+| `production` | enforce | 50 | Production workloads |
+| `ci-cd` | enforce | 40 | CI/CD pipelines |
 
 ### Example Policy
 
@@ -237,14 +281,6 @@ mode: enforce                   # enforce | warn | audit
 settings:
   max_risk_score: 50
   require_image_scan: true
-  image_scanning:
-    enabled: true
-    scanners: [trivy]
-    max_critical: 0
-    max_high: 5
-  secret_scanning:
-    enabled: true
-    block_on_verified: true
 
 rules:
   privileged:
@@ -255,48 +291,21 @@ rules:
   host_namespaces:
     network: { action: block }
     pid: { action: block }
-    ipc: { action: warn }
 
   capabilities:
     blocked:
       - name: SYS_ADMIN
       - name: SYS_PTRACE
-      - name: NET_ADMIN
 
   mounts:
     blocked:
       - path: "/"
       - path: "/var/run/docker.sock"
-    warned:
-      - path: "/etc"
-      - path: "/home"
-
-  security_options:
-    require_seccomp: false
-    require_apparmor: false
-
-  container:
-    require_non_root: false
-    require_resource_limits: false
 
   images:
     allowed_registries: [docker.io, gcr.io, ghcr.io]
     block_latest_tag: false
-
-  environment:
-    block_secrets: true
-    secret_patterns: [PASSWORD, TOKEN, API_KEY]
 ```
-
-### Built-in Templates
-
-| Template | Mode | Risk Score | Use Case |
-|----------|------|------------|----------|
-| `default` | warn | 50 | Balanced security |
-| `strict` | enforce | 25 | Maximum security |
-| `permissive` | audit | 100 | Logging only |
-| `production` | enforce | 50 | Production workloads |
-| `ci-cd` | enforce | 40 | CI/CD pipelines |
 
 ### Risk Scoring
 
@@ -309,66 +318,123 @@ rules:
 
 ---
 
-## Examples
+## CI/CD Integration
 
-### CI/CD Pipeline
+Docker Sentinel provides JSON output (`--json` flag) for easy CI/CD integration.
+
+### GitHub Actions
 
 ```yaml
-# .github/workflows/security.yml
-jobs:
-  security-check:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+- name: Install Docker Sentinel
+  run: |
+    curl -sSL https://raw.githubusercontent.com/rtvkiz/docker-sentinel/main/scripts/install.sh | sudo bash
 
-      - name: Build
-        run: docker build -t myapp:${{ github.sha }} .
-
-      - name: Vulnerability Scan
-        run: sudo sentinel scan --fail-on --max-critical 0 myapp:${{ github.sha }}
-
-      - name: Secret Scan
-        run: sudo sentinel scan-secrets --fail-on-secrets myapp:${{ github.sha }}
+- name: Security Scan
+  run: |
+    sentinel scan --json --fail-on --max-critical 0 myapp:${{ github.sha }}
 ```
 
-### Custom Rule
+### GitLab CI
 
 ```yaml
-custom_rules:
-  - name: require-non-root
-    severity: high
-    condition:
-      field: user
-      operator: equals
-      value: "root"
-    message: "Container must specify a non-root user"
+security-scan:
+  before_script:
+    - curl -sSL https://raw.githubusercontent.com/rtvkiz/docker-sentinel/main/scripts/install.sh | bash
+  script:
+    - sentinel scan --json --fail-on --max-critical 0 $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA
+```
+
+### More Examples
+
+Complete CI/CD examples are available in the [examples/](examples/) directory:
+
+- [GitHub Actions](examples/github-actions.yml)
+- [GitLab CI](examples/gitlab-ci.yml)
+- [Jenkins](examples/Jenkinsfile)
+- [Azure Pipelines](examples/azure-pipelines.yml)
+
+---
+
+## JSON Output
+
+All major commands support `--json` flag for machine-readable output:
+
+```bash
+# Validation result
+sudo sentinel validate --json -- docker run --privileged ubuntu
+```
+
+```json
+{
+  "success": false,
+  "timestamp": "2025-01-18T12:00:00Z",
+  "data": {
+    "allowed": false,
+    "risk_score": 65,
+    "max_score": 50,
+    "command": "docker run --privileged ubuntu",
+    "risks": [
+      {
+        "level": "critical",
+        "category": "privileged",
+        "description": "Privileged mode grants full host capabilities"
+      }
+    ],
+    "mitigations": [
+      "Remove --privileged flag",
+      "Use specific capabilities instead"
+    ]
+  }
+}
 ```
 
 ---
 
 ## Troubleshooting
 
-### Plugin Not Starting
+### Quick Diagnostics
 
 ```bash
-sudo sentinel authz status
-journalctl -u docker-sentinel -f
+sudo sentinel doctor
 ```
 
-### Docker Commands Failing
+This checks:
+- Docker daemon connectivity
+- Configuration and policies
+- Scanner availability
+- Authorization plugin status
+
+### Common Issues
+
+| Issue | Solution |
+|-------|----------|
+| "requires root privileges" | Run with `sudo` |
+| "Docker daemon not running" | `sudo systemctl start docker` |
+| "No policy files found" | Run `sudo sentinel init` |
+| Plugin not starting | Check `journalctl -u docker-sentinel` |
+
+### Emergency Recovery
 
 ```bash
-# Use permissive mode temporarily
+# Temporarily disable enforcement
 sudo sentinel policy use permissive
+
+# Or stop the plugin entirely
+sudo sentinel authz stop
 ```
 
-### Policy Not Reloading
+For detailed troubleshooting, see [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
-```bash
-sudo sentinel authz reload
-# or
-sudo kill -HUP $(cat /var/run/sentinel-authz.pid)
-```
+---
+
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [Cheatsheet](docs/CHEATSHEET.md) | Quick command reference |
+| [Troubleshooting](docs/TROUBLESHOOTING.md) | Common issues and solutions |
+| [Design](docs/DESIGN.md) | Architecture and internals |
+| [Requirements](docs/REQUIREMENTS.md) | Detailed requirements |
 
 ---
 
@@ -378,6 +444,23 @@ sudo kill -HUP $(cat /var/run/sentinel-authz.pid)
 2. **Root Required** - All admin operations require root
 3. **Fail-Closed** - Denies requests on error by default
 4. **Hot Reload Safety** - Debouncing prevents rapid policy changes
+
+---
+
+## Contributing
+
+Contributions are welcome! Please see our contributing guidelines.
+
+```bash
+# Run tests
+make test
+
+# Run linter
+make lint
+
+# Build
+make build
+```
 
 ---
 

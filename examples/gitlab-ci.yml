@@ -1,0 +1,86 @@
+# Example GitLab CI/CD pipeline for container security with Docker Sentinel
+# Copy this file to .gitlab-ci.yml in your project
+
+stages:
+  - build
+  - security
+  - deploy
+
+variables:
+  IMAGE_NAME: $CI_REGISTRY_IMAGE
+  DOCKER_TLS_CERTDIR: "/certs"
+
+# Build the container image
+build:
+  stage: build
+  image: docker:24-dind
+  services:
+    - docker:24-dind
+  script:
+    - docker build -t $IMAGE_NAME:$CI_COMMIT_SHA .
+    - docker save $IMAGE_NAME:$CI_COMMIT_SHA > image.tar
+  artifacts:
+    paths:
+      - image.tar
+    expire_in: 1 hour
+
+# Vulnerability scan using Docker Sentinel
+vulnerability-scan:
+  stage: security
+  image: ghcr.io/rtvkiz/docker-sentinel:latest
+  services:
+    - docker:24-dind
+  dependencies:
+    - build
+  before_script:
+    - docker load < image.tar
+  script:
+    - sentinel scan --json --fail-on --max-critical 0 --max-high 5 $IMAGE_NAME:$CI_COMMIT_SHA
+  allow_failure: false
+
+# Secret scan using Docker Sentinel
+secret-scan:
+  stage: security
+  image: ghcr.io/rtvkiz/docker-sentinel:latest
+  services:
+    - docker:24-dind
+  dependencies:
+    - build
+  before_script:
+    - docker load < image.tar
+  script:
+    - sentinel scan-secrets --json --fail-on-secrets $IMAGE_NAME:$CI_COMMIT_SHA
+  allow_failure: false
+
+# Validate Docker run configuration
+config-validation:
+  stage: security
+  image: ghcr.io/rtvkiz/docker-sentinel:latest
+  script:
+    - |
+      sentinel validate --json -- docker run \
+        --read-only \
+        --cap-drop ALL \
+        --security-opt no-new-privileges:true \
+        --user 1000:1000 \
+        $IMAGE_NAME:$CI_COMMIT_SHA
+  allow_failure: false
+
+# Deploy (only on main branch after security checks pass)
+deploy:
+  stage: deploy
+  image: docker:24-dind
+  services:
+    - docker:24-dind
+  dependencies:
+    - build
+  before_script:
+    - docker load < image.tar
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+  script:
+    - docker tag $IMAGE_NAME:$CI_COMMIT_SHA $IMAGE_NAME:latest
+    - docker push $IMAGE_NAME:$CI_COMMIT_SHA
+    - docker push $IMAGE_NAME:latest
+  only:
+    - main
+  when: manual

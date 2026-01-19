@@ -6,8 +6,12 @@ VERSION?=0.1.0
 BUILD_DIR=./bin
 GO=go
 
+# Get git commit and build date
+GIT_COMMIT=$(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+BUILD_DATE=$(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
+
 # Build flags
-LDFLAGS=-ldflags "-X main.version=$(VERSION) -s -w"
+LDFLAGS=-ldflags "-X main.version=$(VERSION) -X main.gitCommit=$(GIT_COMMIT) -X main.buildDate=$(BUILD_DATE) -s -w"
 
 # Default target
 all: deps build

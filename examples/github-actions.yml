@@ -1,0 +1,81 @@
+# Example GitHub Actions workflow for container security with Docker Sentinel
+# Copy this file to .github/workflows/container-security.yml in your project
+
+name: Container Security
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  IMAGE_NAME: myapp
+  REGISTRY: ghcr.io
+
+jobs:
+  build-and-scan:
+    name: Build and Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true
+          tags: ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Option 1: Use Docker Sentinel container
+      - name: Vulnerability Scan (Sentinel)
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            ghcr.io/rtvkiz/docker-sentinel:latest \
+            scan --json --fail-on --max-critical 0 ${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+      # Option 2: Install Sentinel directly
+      - name: Install Docker Sentinel
+        run: |
+          curl -sSL https://github.com/rtvkiz/docker-sentinel/releases/latest/download/sentinel-linux-amd64 -o /usr/local/bin/sentinel
+          chmod +x /usr/local/bin/sentinel
+
+      - name: Secret Scan
+        run: |
+          sentinel scan-secrets --json --fail-on-secrets ${{ env.IMAGE_NAME }}:${{ github.sha }}
+        continue-on-error: false
+
+      - name: Validate Docker Run Command
+        run: |
+          # Validate the command that will be used in production
+          sentinel validate --json -- docker run \
+            --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+      - name: Login to Registry
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          docker tag ${{ env.IMAGE_NAME }}:${{ github.sha }} ${{ env.REGISTRY }}/${{ github.repository }}:${{ github.sha }}
+          docker push ${{ env.REGISTRY }}/${{ github.repository }}:${{ github.sha }}

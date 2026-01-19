@@ -56,7 +56,8 @@ func runExec(cmd *cobra.Command, args []string) error {
 	result := engine.Validate(parsed)
 
 	// Check if we should block
-	force, _ := cmd.Flags().GetBool("force")
+	// Use manual extraction since DisableFlagParsing prevents Cobra from parsing --force
+	force := extractForceFlag(args)
 	if !result.Allowed && !force {
 		// Print detailed findings
 		printValidationResult(result)
@@ -249,12 +250,23 @@ func scanSecretsAfterBuild(image string, force bool) error {
 
 func runValidate(cmd *cobra.Command, args []string) error {
 	dockerArgs := extractDockerArgs(args)
+	// Use manual extraction since DisableFlagParsing prevents Cobra from parsing --json
+	jsonOutput := extractJSONFlag(args)
+
 	if len(dockerArgs) == 0 {
+		if jsonOutput {
+			outputJSONError("MISSING_COMMAND", "No docker command provided", "Use: sentinel validate -- docker run ...")
+			os.Exit(1)
+		}
 		return serrors.MissingDockerCommand("validate")
 	}
 
 	// Validate we have at least a command
 	if len(dockerArgs) == 1 && dockerArgs[0] == "docker" {
+		if jsonOutput {
+			outputJSONError("MISSING_SUBCOMMAND", "No docker subcommand provided", "Specify a docker subcommand after 'docker'")
+			os.Exit(1)
+		}
 		return serrors.New(serrors.ErrMissingArgument, "No docker subcommand provided").
 			WithDetail("You provided 'docker' but no subcommand (run, build, push, etc.)").
 			WithSuggestion("Specify a docker subcommand after 'docker'").
@@ -263,16 +275,33 @@ func runValidate(cmd *cobra.Command, args []string) error {
 
 	parsed, err := interceptor.ParseDockerCommand(dockerArgs)
 	if err != nil {
+		if jsonOutput {
+			outputJSONError("PARSE_ERROR", "Failed to parse docker command", err.Error())
+			os.Exit(1)
+		}
 		return serrors.ParseError(strings.Join(dockerArgs, " "), err)
 	}
 
 	// Validate the parsed command has required fields
 	if err := validateParsedCommand(parsed); err != nil {
+		if jsonOutput {
+			outputJSONError("VALIDATION_ERROR", err.Error(), "")
+			os.Exit(1)
+		}
 		return err
 	}
 
 	engine := rules.NewEngine(cfg)
 	result := engine.Validate(parsed)
+
+	if jsonOutput {
+		output := convertValidationResult(result, strings.Join(dockerArgs, " "), cfg.GlobalSettings.MaxRiskScore)
+		outputJSON(output, result.Allowed)
+		if !result.Allowed {
+			os.Exit(1)
+		}
+		return nil
+	}
 
 	printValidationResult(result)
 
@@ -283,7 +312,13 @@ func runValidate(cmd *cobra.Command, args []string) error {
 }
 
 func runScanSecrets(cmd *cobra.Command, args []string) error {
+	jsonOutput := isJSONOutput(cmd)
+
 	if len(args) == 0 {
+		if jsonOutput {
+			outputJSONError("MISSING_ARGUMENT", "No image specified", "Usage: sentinel scan-secrets <image>")
+			os.Exit(1)
+		}
 		return serrors.MissingArgument("image", "scan-secrets").
 			WithDetail("The scan-secrets command requires a container image to scan").
 			WithExample("sentinel scan-secrets myapp:latest")
@@ -291,6 +326,10 @@ func runScanSecrets(cmd *cobra.Command, args []string) error {
 
 	image := args[0]
 	if image == "" {
+		if jsonOutput {
+			outputJSONError("MISSING_ARGUMENT", "Image name cannot be empty", "")
+			os.Exit(1)
+		}
 		return serrors.MissingArgument("image", "scan-secrets").
 			WithDetail("Image name cannot be empty").
 			WithExample("sentinel scan-secrets nginx:latest")
@@ -298,18 +337,28 @@ func runScanSecrets(cmd *cobra.Command, args []string) error {
 
 	// Validate image format (basic check)
 	if strings.HasPrefix(image, "-") {
+		if jsonOutput {
+			outputJSONError("INVALID_ARGUMENT", "Image name cannot start with '-'", "Did you forget to specify the image?")
+			os.Exit(1)
+		}
 		return serrors.InvalidArgument("image", image, "Image name cannot start with '-'. Did you forget to specify the image?").
 			WithExample("sentinel scan-secrets myapp:latest")
 	}
 
 	failOnSecrets, _ := cmd.Flags().GetBool("fail-on-secrets")
 
-	fmt.Printf("Scanning image for secrets: %s\n", image)
-	fmt.Println(strings.Repeat("-", 50))
+	if !jsonOutput {
+		fmt.Printf("Scanning image for secrets: %s\n", image)
+		fmt.Println(strings.Repeat("-", 50))
+	}
 
 	trufflehog := scanner.NewTruffleHogScanner(cfg)
 
 	if !trufflehog.Available() {
+		if jsonOutput {
+			outputJSONError("MISSING_DEPENDENCY", "TruffleHog is not installed", "Install with: brew install trufflehog")
+			os.Exit(1)
+		}
 		return serrors.MissingDependency("TruffleHog", "secret scanning", []string{
 			"brew install trufflehog",
 			"pip install trufflehog",
@@ -322,11 +371,41 @@ func runScanSecrets(cmd *cobra.Command, args []string) error {
 		// Check for common error patterns
 		errStr := err.Error()
 		if strings.Contains(errStr, "No such image") || strings.Contains(errStr, "not found") {
+			if jsonOutput {
+				outputJSONError("IMAGE_NOT_FOUND", fmt.Sprintf("Image not found: %s", image), "Pull the image first or check the image name")
+				os.Exit(1)
+			}
 			return serrors.ImageNotFound(image).
 				WithSuggestion("Pull the image first or check the image name").
 				WithExample(fmt.Sprintf("docker pull %s", image))
 		}
+		if jsonOutput {
+			outputJSONError("SCAN_ERROR", "Secret scan failed", err.Error())
+			os.Exit(1)
+		}
 		return serrors.ScanFailed("TruffleHog", image, err)
+	}
+
+	if jsonOutput {
+		// Count verified secrets
+		verified := 0
+		for _, s := range result.Secrets {
+			if s.Verified {
+				verified++
+			}
+		}
+		output := SecretScanOutput{
+			Image:        image,
+			SecretsFound: result.SecretsFound,
+			Secrets:      result.Secrets,
+			Verified:     verified,
+		}
+		hasSecrets := failOnSecrets && result.SecretsFound > 0
+		outputJSON(output, !hasSecrets)
+		if hasSecrets {
+			os.Exit(1)
+		}
+		return nil
 	}
 
 	scanner.PrintSecretScanResult(result)
@@ -341,7 +420,13 @@ func runScanSecrets(cmd *cobra.Command, args []string) error {
 }
 
 func runScan(cmd *cobra.Command, args []string) error {
+	jsonOutput := isJSONOutput(cmd)
+
 	if len(args) == 0 {
+		if jsonOutput {
+			outputJSONError("MISSING_ARGUMENT", "No image specified", "Usage: sentinel scan <image>")
+			os.Exit(1)
+		}
 		return serrors.MissingArgument("image", "scan").
 			WithDetail("The scan command requires a container image to scan for vulnerabilities").
 			WithExample("sentinel scan nginx:latest")
@@ -349,6 +434,10 @@ func runScan(cmd *cobra.Command, args []string) error {
 
 	image := args[0]
 	if image == "" {
+		if jsonOutput {
+			outputJSONError("MISSING_ARGUMENT", "Image name cannot be empty", "")
+			os.Exit(1)
+		}
 		return serrors.MissingArgument("image", "scan").
 			WithDetail("Image name cannot be empty").
 			WithExample("sentinel scan nginx:latest")
@@ -356,37 +445,51 @@ func runScan(cmd *cobra.Command, args []string) error {
 
 	// Validate image format (basic check)
 	if strings.HasPrefix(image, "-") {
+		if jsonOutput {
+			outputJSONError("INVALID_ARGUMENT", "Image name cannot start with '-'", "Did you forget to specify the image?")
+			os.Exit(1)
+		}
 		return serrors.InvalidArgument("image", image, "Image name cannot start with '-'. Did you forget to specify the image?").
 			WithExample("sentinel scan myapp:latest")
 	}
 
-	scanners, _ := cmd.Flags().GetStringSlice("scanner")
+	scannerNames, _ := cmd.Flags().GetStringSlice("scanner")
 	severity, _ := cmd.Flags().GetString("severity")
 	failOn, _ := cmd.Flags().GetBool("fail-on")
 	maxCritical, _ := cmd.Flags().GetInt("max-critical")
 	maxHigh, _ := cmd.Flags().GetInt("max-high")
 
 	// Validate scanners
-	for _, s := range scanners {
+	for _, s := range scannerNames {
 		if !contains(validScanners, s) {
+			if jsonOutput {
+				outputJSONError("INVALID_FLAG", fmt.Sprintf("Invalid scanner: %s", s), fmt.Sprintf("Valid scanners: %v", validScanners))
+				os.Exit(1)
+			}
 			return serrors.InvalidFlag("scanner", s, validScanners)
 		}
 	}
 
 	// Validate max values
 	if maxCritical < 0 {
+		if jsonOutput {
+			outputJSONError("INVALID_ARGUMENT", "max-critical must be >= 0", "")
+			os.Exit(1)
+		}
 		return serrors.InvalidArgument("max-critical", fmt.Sprintf("%d", maxCritical), "Value must be >= 0")
 	}
 
-	fmt.Printf("Scanning image: %s\n", image)
-	fmt.Printf("Using scanners: %v\n", scanners)
-	fmt.Println(strings.Repeat("-", 50))
+	if !jsonOutput {
+		fmt.Printf("Scanning image: %s\n", image)
+		fmt.Printf("Using scanners: %v\n", scannerNames)
+		fmt.Println(strings.Repeat("-", 50))
+	}
 
 	var allResults []*scanner.ScanResult
 	var hasVulns bool
 	var scannerErrors []string
 
-	for _, s := range scanners {
+	for _, s := range scannerNames {
 		var sc scanner.ImageScanner
 		switch s {
 		case "trivy":
@@ -410,11 +513,39 @@ func runScan(cmd *cobra.Command, args []string) error {
 		}
 
 		allResults = append(allResults, result)
-		printScanResult(result)
+		if !jsonOutput {
+			printScanResult(result)
+		}
 
 		if result.TotalCritical > maxCritical || (maxHigh >= 0 && result.TotalHigh > maxHigh) {
 			hasVulns = true
 		}
+	}
+
+	// If no scanners succeeded, return error
+	if len(allResults) == 0 {
+		if jsonOutput {
+			outputJSONError("SCAN_ERROR", "No scanners were able to complete the scan", strings.Join(scannerErrors, "; "))
+			os.Exit(1)
+		}
+		return serrors.New(serrors.ErrScanError, "No scanners were able to complete the scan").
+			WithDetail(strings.Join(scannerErrors, "; ")).
+			WithSuggestion("Install at least one scanner: trivy, grype, or docker scout")
+	}
+
+	if jsonOutput {
+		output := ScanOutput{
+			Image:             image,
+			Scanners:          scannerNames,
+			Results:           allResults,
+			Summary:           aggregateScanResults(allResults),
+			ThresholdExceeded: failOn && hasVulns,
+		}
+		outputJSON(output, !(failOn && hasVulns))
+		if failOn && hasVulns {
+			os.Exit(1)
+		}
+		return nil
 	}
 
 	// Report scanner errors
@@ -423,13 +554,6 @@ func runScan(cmd *cobra.Command, args []string) error {
 		for _, e := range scannerErrors {
 			fmt.Printf("  ⚠ %s\n", e)
 		}
-	}
-
-	// If no scanners succeeded, return error
-	if len(allResults) == 0 {
-		return serrors.New(serrors.ErrScanError, "No scanners were able to complete the scan").
-			WithDetail(strings.Join(scannerErrors, "; ")).
-			WithSuggestion("Install at least one scanner: trivy, grype, or docker scout")
 	}
 
 	if failOn && hasVulns {
@@ -1010,6 +1134,34 @@ func extractDockerArgs(args []string) []string {
 		}
 	}
 	return args
+}
+
+// extractJSONFlag checks if --json flag is present in args before the -- separator
+// This is needed because commands with DisableFlagParsing don't parse flags automatically
+func extractJSONFlag(args []string) bool {
+	for _, arg := range args {
+		if arg == "--" {
+			break
+		}
+		if arg == "--json" || arg == "-j" {
+			return true
+		}
+	}
+	return false
+}
+
+// extractForceFlag checks if --force or -f flag is present in args before the -- separator
+// This is needed because commands with DisableFlagParsing don't parse flags automatically
+func extractForceFlag(args []string) bool {
+	for _, arg := range args {
+		if arg == "--" {
+			break
+		}
+		if arg == "--force" || arg == "-f" {
+			return true
+		}
+	}
+	return false
 }
 
 func executeDocker(args []string) error {

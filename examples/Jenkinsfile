@@ -1,0 +1,107 @@
+// Example Jenkinsfile for container security with Docker Sentinel
+// Copy this file to Jenkinsfile in your project
+
+pipeline {
+    agent {
+        docker {
+            image 'docker:24-dind'
+            args '-v /var/run/docker.sock:/var/run/docker.sock --privileged'
+        }
+    }
+
+    environment {
+        IMAGE_NAME = 'myapp'
+        REGISTRY = 'your-registry.com'
+        REGISTRY_CREDENTIALS = 'docker-registry-credentials'
+    }
+
+    stages {
+        stage('Build') {
+            steps {
+                script {
+                    def imageTag = "${env.IMAGE_NAME}:${env.BUILD_NUMBER}"
+                    sh "docker build -t ${imageTag} ."
+                    env.IMAGE_TAG = imageTag
+                }
+            }
+        }
+
+        stage('Security Scan') {
+            parallel {
+                stage('Vulnerability Scan') {
+                    steps {
+                        script {
+                            // Using Docker Sentinel container
+                            sh """
+                                docker run --rm \
+                                    -v /var/run/docker.sock:/var/run/docker.sock \
+                                    ghcr.io/rtvkiz/docker-sentinel:latest \
+                                    scan --json --fail-on --max-critical 0 ${env.IMAGE_TAG}
+                            """
+                        }
+                    }
+                }
+
+                stage('Secret Scan') {
+                    steps {
+                        script {
+                            sh """
+                                docker run --rm \
+                                    -v /var/run/docker.sock:/var/run/docker.sock \
+                                    ghcr.io/rtvkiz/docker-sentinel:latest \
+                                    scan-secrets --json --fail-on-secrets ${env.IMAGE_TAG}
+                            """
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Config Validation') {
+            steps {
+                script {
+                    // Validate the Docker run command matches security policy
+                    sh """
+                        docker run --rm \
+                            ghcr.io/rtvkiz/docker-sentinel:latest \
+                            validate --json -- docker run \
+                            --read-only \
+                            --cap-drop ALL \
+                            --security-opt no-new-privileges:true \
+                            ${env.IMAGE_TAG}
+                    """
+                }
+            }
+        }
+
+        stage('Push') {
+            when {
+                branch 'main'
+            }
+            steps {
+                script {
+                    withCredentials([usernamePassword(
+                        credentialsId: env.REGISTRY_CREDENTIALS,
+                        usernameVariable: 'REGISTRY_USER',
+                        passwordVariable: 'REGISTRY_PASS'
+                    )]) {
+                        sh "docker login -u ${REGISTRY_USER} -p ${REGISTRY_PASS} ${env.REGISTRY}"
+                        sh "docker tag ${env.IMAGE_TAG} ${env.REGISTRY}/${env.IMAGE_TAG}"
+                        sh "docker push ${env.REGISTRY}/${env.IMAGE_TAG}"
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            // Clean up
+            sh "docker rmi ${env.IMAGE_TAG} || true"
+        }
+        failure {
+            // Send notification on failure
+            echo 'Security scan failed! Check the logs for details.'
+        }
+    }
+}
