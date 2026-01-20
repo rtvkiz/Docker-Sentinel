@@ -343,6 +343,8 @@ The **policy mode** determines how violations are handled:
 | `warn` | **Allows** all commands, logs violations as warnings | Development, testing new policies |
 | `audit` | **Allows** all commands, only logs for analysis | Initial rollout, monitoring |
 
+> ⚠️ **Security Warning:** Only `enforce` mode actually prevents dangerous operations. In `warn` and `audit` modes, users can still run privileged containers and escape to host. See [Security Considerations](#️-critical-use-enforce-mode-in-production) for details.
+
 **Important:** Policy mode is separate from rule actions.
 
 ```yaml
@@ -539,6 +541,26 @@ For detailed troubleshooting, see [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING
 2. **Root Required** - All admin operations require root
 3. **Fail-Closed** - Denies requests on error by default
 4. **Hot Reload Safety** - Debouncing prevents rapid policy changes
+
+### ⚠️ Critical: Use Enforce Mode in Production
+
+**Policy mode `enforce` is essential to prevent privilege escalation.**
+
+In `warn` or `audit` mode, non-root users with Docker access can still:
+- Run privileged containers (`--privileged`)
+- Mount the host filesystem (`-v /:/host`)
+- Access the Docker socket (`-v /var/run/docker.sock:/var/run/docker.sock`)
+- Escape container isolation and gain root access on the host
+
+```bash
+# INSECURE: Warn mode only logs, doesn't block
+sudo sentinel policy use development  # mode: warn
+
+# SECURE: Enforce mode actually blocks dangerous commands
+sudo sentinel policy use production   # mode: enforce
+```
+
+**Recommendation:** Always use `mode: enforce` in production environments where non-root users have Docker access. The `warn` mode should only be used for testing policies before enforcement.
 
 ---
 
