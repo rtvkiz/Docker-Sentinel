@@ -4,7 +4,6 @@
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
 ![Platform](https://img.shields.io/badge/Platform-Linux-FCC624?logo=linux&logoColor=black)
 ![Docker](https://img.shields.io/badge/Docker-20.10+-2496ED?logo=docker&logoColor=white)
-[![CI](https://github.com/rtvkiz/docker-sentinel/actions/workflows/ci.yml/badge.svg)](https://github.com/rtvkiz/docker-sentinel/actions/workflows/ci.yml)
 
 **Pre-runtime Container Security for Docker**
 
